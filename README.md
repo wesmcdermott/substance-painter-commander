@@ -8,6 +8,8 @@ A powerful command palette plugin for Substance Painter with macro creation, pro
 
 This software is an independent, personal project and is provided "as is." It is not an official Adobe product, plugin, or service, and it has not been reviewed, endorsed, or supported by Adobe. Any references to Adobe software are for compatibility purposes only. Adobe and related marks are trademarks of Adobe Inc.
 
+**🎓 Learning Project Notice**: This plugin was developed as a learning exercise to explore Substance Painter's Python API and advanced Qt UI development. While functional, it is **not recommended for production use** in professional workflows. Users should thoroughly test all features in non-critical projects before considering any production implementation.
+
 ## 🚀 Features
 
 ### 🎯 Advanced Command Palette

@@ -21,6 +21,326 @@ from substance_painter.textureset import ChannelType
 WIDGETS = []
 MAIN_WINDOW = None
 
+class MacroCreationDialog(QtWidgets.QDialog):
+    """Custom dialog for creating macros with hotkey assignment"""
+    
+    def __init__(self, parent, selected_commands):
+        super().__init__(parent)
+        self.selected_commands = selected_commands
+        self.hotkey_sequence = None
+        self.setupUI()
+    
+    def setupUI(self):
+        """Setup the dialog UI"""
+        self.setWindowTitle("Create Macro")
+        self.setModal(True)
+        self.resize(400, 300)
+        
+        layout = QtWidgets.QVBoxLayout()
+        
+        # Commands preview
+        commands_label = QtWidgets.QLabel("Commands in this macro:")
+        commands_label.setStyleSheet("font-weight: bold;")
+        layout.addWidget(commands_label)
+        
+        commands_list = QtWidgets.QTextEdit()
+        commands_list.setReadOnly(True)
+        commands_list.setMaximumHeight(100)
+        commands_text = "\n".join([f"• {cmd}" for cmd in self.selected_commands])
+        commands_list.setText(commands_text)
+        layout.addWidget(commands_list)
+        
+        # Macro name input
+        name_label = QtWidgets.QLabel("Macro name:")
+        name_label.setStyleSheet("font-weight: bold; margin-top: 10px;")
+        layout.addWidget(name_label)
+        
+        self.name_input = QtWidgets.QLineEdit()
+        self.name_input.setPlaceholderText("Enter macro name...")
+        layout.addWidget(self.name_input)
+        
+        # Hotkey assignment
+        hotkey_label = QtWidgets.QLabel("Hotkey (optional):")
+        hotkey_label.setStyleSheet("font-weight: bold; margin-top: 10px;")
+        layout.addWidget(hotkey_label)
+        
+        hotkey_layout = QtWidgets.QHBoxLayout()
+        
+        self.hotkey_input = QtWidgets.QLineEdit()
+        self.hotkey_input.setReadOnly(True)
+        self.hotkey_input.setPlaceholderText("Click 'Record Hotkey' and press keys...")
+        hotkey_layout.addWidget(self.hotkey_input)
+        
+        self.record_button = QtWidgets.QPushButton("Record Hotkey")
+        self.record_button.clicked.connect(self.record_hotkey)
+        hotkey_layout.addWidget(self.record_button)
+        
+        self.clear_hotkey_button = QtWidgets.QPushButton("Clear")
+        self.clear_hotkey_button.clicked.connect(self.clear_hotkey)
+        hotkey_layout.addWidget(self.clear_hotkey_button)
+        
+        layout.addLayout(hotkey_layout)
+        
+        # Help text
+        help_text = QtWidgets.QLabel(
+            "Examples: F5, Ctrl+Shift+W, Alt+Q, Shift+F1\n" +
+            "Avoid conflicts with Substance Painter shortcuts."
+        )
+        help_text.setStyleSheet("color: #888; font-size: 11px; margin-top: 5px;")
+        help_text.setWordWrap(True)
+        layout.addWidget(help_text)
+        
+        # Buttons
+        button_layout = QtWidgets.QHBoxLayout()
+        button_layout.addStretch()
+        
+        cancel_button = QtWidgets.QPushButton("Cancel")
+        cancel_button.clicked.connect(self.reject)
+        button_layout.addWidget(cancel_button)
+        
+        self.create_button = QtWidgets.QPushButton("Create Macro")
+        self.create_button.clicked.connect(self.accept)
+        self.create_button.setDefault(True)
+        button_layout.addWidget(self.create_button)
+        
+        layout.addLayout(button_layout)
+        
+        self.setLayout(layout)
+        
+        # Focus on name input
+        self.name_input.setFocus()
+    
+    def record_hotkey(self):
+        """Record a hotkey sequence"""
+        self.record_button.setText("Press keys...")
+        self.record_button.setEnabled(False)
+        self.hotkey_input.setText("Listening for keys...")
+        
+        # Install event filter to capture key sequence
+        self.installEventFilter(self)
+        self.grabKeyboard()
+    
+    def eventFilter(self, obj, event):
+        """Capture keyboard events for hotkey recording"""
+        if event.type() == QtCore.QEvent.Type.KeyPress:
+            key = event.key()
+            modifiers = event.modifiers()
+            
+            # Ignore standalone modifier keys
+            if key in (QtCore.Qt.Key.Key_Control, QtCore.Qt.Key.Key_Alt, 
+                      QtCore.Qt.Key.Key_Shift, QtCore.Qt.Key.Key_Meta):
+                return False
+            
+            # Build key sequence (PySide6 compatible)
+            try:
+                if modifiers:
+                    # Create QKeyCombination for PySide6
+                    key_combination = QtCore.QKeyCombination(modifiers, key)
+                    key_sequence = QtGui.QKeySequence(key_combination)
+                else:
+                    # Just the key without modifiers
+                    key_sequence = QtGui.QKeySequence(key)
+                
+                sequence_text = key_sequence.toString()
+            except Exception as e:
+                # Fallback for compatibility
+                modifier_names = []
+                if modifiers & QtCore.Qt.KeyboardModifier.ControlModifier:
+                    modifier_names.append("Ctrl")
+                if modifiers & QtCore.Qt.KeyboardModifier.AltModifier:
+                    modifier_names.append("Alt")
+                if modifiers & QtCore.Qt.KeyboardModifier.ShiftModifier:
+                    modifier_names.append("Shift")
+                if modifiers & QtCore.Qt.KeyboardModifier.MetaModifier:
+                    modifier_names.append("Meta")
+                
+                key_name = QtCore.Qt.Key(key).name.replace('Key_', '') if hasattr(QtCore.Qt.Key(key), 'name') else f"Key_{key}"
+                sequence_text = "+".join(modifier_names + [key_name]) if modifier_names else key_name
+            
+            if sequence_text:
+                self.hotkey_sequence = sequence_text
+                self.hotkey_input.setText(sequence_text)
+            
+            # Stop recording
+            self.releaseKeyboard()
+            self.removeEventFilter(self)
+            self.record_button.setText("Record Hotkey")
+            self.record_button.setEnabled(True)
+            
+            return True
+        
+        return False
+    
+    def clear_hotkey(self):
+        """Clear the hotkey assignment"""
+        self.hotkey_sequence = None
+        self.hotkey_input.setText("")
+    
+    def get_macro_name(self):
+        """Get the entered macro name"""
+        return self.name_input.text().strip()
+    
+    def get_hotkey(self):
+        """Get the assigned hotkey"""
+        return self.hotkey_sequence
+    
+    def accept(self):
+        """Validate and accept the dialog"""
+        name = self.get_macro_name()
+        if not name:
+            QtWidgets.QMessageBox.warning(self, "Missing Name", "Please enter a macro name.")
+            return
+        
+        super().accept()
+
+class HotkeyEditDialog(QtWidgets.QDialog):
+    """Dialog for editing hotkeys of existing macros"""
+    
+    def __init__(self, parent, macro_name, macro_data):
+        super().__init__(parent)
+        self.macro_name = macro_name
+        self.macro_data = macro_data
+        self.hotkey_sequence = macro_data.get('hotkey', None)
+        self.setupUI()
+    
+    def setupUI(self):
+        """Setup the dialog UI"""
+        self.setWindowTitle(f"Edit Hotkey - {self.macro_name}")
+        self.setModal(True)
+        self.resize(350, 200)
+        
+        layout = QtWidgets.QVBoxLayout()
+        
+        # Macro info
+        info_label = QtWidgets.QLabel(f"Macro: {self.macro_name}")
+        info_label.setStyleSheet("font-weight: bold; font-size: 14px;")
+        layout.addWidget(info_label)
+        
+        commands_label = QtWidgets.QLabel(f"{len(self.macro_data['commands'])} commands")
+        commands_label.setStyleSheet("color: #888; margin-bottom: 15px;")
+        layout.addWidget(commands_label)
+        
+        # Current hotkey
+        current_label = QtWidgets.QLabel("Current hotkey:")
+        current_label.setStyleSheet("font-weight: bold;")
+        layout.addWidget(current_label)
+        
+        current_hotkey = self.macro_data.get('hotkey', 'None')
+        current_display = QtWidgets.QLabel(current_hotkey)
+        current_display.setStyleSheet("background: #333; padding: 5px; border-radius: 3px; margin-bottom: 10px;")
+        layout.addWidget(current_display)
+        
+        # New hotkey assignment
+        new_label = QtWidgets.QLabel("New hotkey:")
+        new_label.setStyleSheet("font-weight: bold;")
+        layout.addWidget(new_label)
+        
+        hotkey_layout = QtWidgets.QHBoxLayout()
+        
+        self.hotkey_input = QtWidgets.QLineEdit()
+        self.hotkey_input.setReadOnly(True)
+        self.hotkey_input.setPlaceholderText("Click 'Record' to set new hotkey...")
+        if self.hotkey_sequence:
+            self.hotkey_input.setText(self.hotkey_sequence)
+        hotkey_layout.addWidget(self.hotkey_input)
+        
+        self.record_button = QtWidgets.QPushButton("Record")
+        self.record_button.clicked.connect(self.record_hotkey)
+        hotkey_layout.addWidget(self.record_button)
+        
+        self.clear_button = QtWidgets.QPushButton("Remove")
+        self.clear_button.clicked.connect(self.clear_hotkey)
+        hotkey_layout.addWidget(self.clear_button)
+        
+        layout.addLayout(hotkey_layout)
+        
+        # Buttons
+        button_layout = QtWidgets.QHBoxLayout()
+        button_layout.addStretch()
+        
+        cancel_button = QtWidgets.QPushButton("Cancel")
+        cancel_button.clicked.connect(self.reject)
+        button_layout.addWidget(cancel_button)
+        
+        save_button = QtWidgets.QPushButton("Save")
+        save_button.clicked.connect(self.accept)
+        save_button.setDefault(True)
+        button_layout.addWidget(save_button)
+        
+        layout.addLayout(button_layout)
+        
+        self.setLayout(layout)
+    
+    def record_hotkey(self):
+        """Record a hotkey sequence"""
+        self.record_button.setText("Press keys...")
+        self.record_button.setEnabled(False)
+        self.hotkey_input.setText("Listening for keys...")
+        
+        # Install event filter to capture key sequence
+        self.installEventFilter(self)
+        self.grabKeyboard()
+    
+    def eventFilter(self, obj, event):
+        """Capture keyboard events for hotkey recording"""
+        if event.type() == QtCore.QEvent.Type.KeyPress:
+            key = event.key()
+            modifiers = event.modifiers()
+            
+            # Ignore standalone modifier keys
+            if key in (QtCore.Qt.Key.Key_Control, QtCore.Qt.Key.Key_Alt, 
+                      QtCore.Qt.Key.Key_Shift, QtCore.Qt.Key.Key_Meta):
+                return False
+            
+            # Build key sequence (PySide6 compatible)
+            try:
+                if modifiers:
+                    # Create QKeyCombination for PySide6
+                    key_combination = QtCore.QKeyCombination(modifiers, key)
+                    key_sequence = QtGui.QKeySequence(key_combination)
+                else:
+                    # Just the key without modifiers
+                    key_sequence = QtGui.QKeySequence(key)
+                
+                sequence_text = key_sequence.toString()
+            except Exception as e:
+                # Fallback for compatibility
+                modifier_names = []
+                if modifiers & QtCore.Qt.KeyboardModifier.ControlModifier:
+                    modifier_names.append("Ctrl")
+                if modifiers & QtCore.Qt.KeyboardModifier.AltModifier:
+                    modifier_names.append("Alt")
+                if modifiers & QtCore.Qt.KeyboardModifier.ShiftModifier:
+                    modifier_names.append("Shift")
+                if modifiers & QtCore.Qt.KeyboardModifier.MetaModifier:
+                    modifier_names.append("Meta")
+                
+                key_name = QtCore.Qt.Key(key).name.replace('Key_', '') if hasattr(QtCore.Qt.Key(key), 'name') else f"Key_{key}"
+                sequence_text = "+".join(modifier_names + [key_name]) if modifier_names else key_name
+            
+            if sequence_text:
+                self.hotkey_sequence = sequence_text
+                self.hotkey_input.setText(sequence_text)
+            
+            # Stop recording
+            self.releaseKeyboard()
+            self.removeEventFilter(self)
+            self.record_button.setText("Record")
+            self.record_button.setEnabled(True)
+            
+            return True
+        
+        return False
+    
+    def clear_hotkey(self):
+        """Clear the hotkey assignment"""
+        self.hotkey_sequence = None
+        self.hotkey_input.setText("")
+    
+    def get_hotkey(self):
+        """Get the assigned hotkey"""
+        return self.hotkey_sequence
+
 class CommanderWidget(QtWidgets.QWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -33,6 +353,7 @@ class CommanderWidget(QtWidgets.QWidget):
         self.macro_creation_mode = False
         self.selected_commands = []  # Commands selected for macro creation
         self.macros = {}  # Stored macros
+        self.macro_actions = {}  # QAction objects for macro hotkeys
         self.macros_file = self._get_macros_file_path()
         self.load_macros()
         
@@ -207,12 +528,20 @@ class CommanderWidget(QtWidgets.QWidget):
             return os.path.join(os.path.expanduser("~"), "commander_macros.json")
     
     def load_macros(self):
-        """Load macros from file"""
+        """Load macros from file and register their hotkeys"""
         try:
             if os.path.exists(self.macros_file):
                 with open(self.macros_file, 'r') as f:
                     self.macros = json.load(f)
-                self.log(f"Loaded {len(self.macros)} macros")
+                
+                # Register hotkeys for existing macros
+                hotkey_count = 0
+                for macro_name, macro_data in self.macros.items():
+                    if 'hotkey' in macro_data:
+                        self.register_macro_hotkey(macro_name, macro_data['hotkey'])
+                        hotkey_count += 1
+                
+                self.log(f"Loaded {len(self.macros)} macros ({hotkey_count} with hotkeys)")
             else:
                 self.macros = {}
                 self.log("No macros file found, starting with empty macros")
@@ -228,6 +557,99 @@ class CommanderWidget(QtWidgets.QWidget):
             self.log(f"Saved {len(self.macros)} macros")
         except Exception as e:
             self.log(f"Failed to save macros: {str(e)}")
+    
+    def is_hotkey_conflict(self, hotkey, macro_name):
+        """Check if hotkey conflicts with existing assignments"""
+        # Check against other macros
+        for name, macro_data in self.macros.items():
+            if name != macro_name and 'hotkey' in macro_data:
+                if macro_data['hotkey'] == hotkey:
+                    reply = QtWidgets.QMessageBox.question(
+                        self, "Hotkey Conflict",
+                        f"Hotkey '{hotkey}' is already assigned to macro '{name}'.\n" +
+                        f"Remove it from '{name}' and assign to '{macro_name}'?",
+                        QtWidgets.QMessageBox.StandardButton.Yes | QtWidgets.QMessageBox.StandardButton.No
+                    )
+                    if reply == QtWidgets.QMessageBox.StandardButton.Yes:
+                        # Remove from old macro
+                        self.unregister_macro_hotkey(name)
+                        del self.macros[name]['hotkey']
+                        return False  # No conflict, we resolved it
+                    else:
+                        return True  # Conflict, user declined to resolve
+        
+        # Check against known Substance Painter shortcuts (basic ones)
+        sp_shortcuts = [
+            'Ctrl+N', 'Ctrl+O', 'Ctrl+S', 'Ctrl+Z', 'Ctrl+Y', 'Ctrl+C', 'Ctrl+V', 'Ctrl+X',
+            'Ctrl+A', 'F1', 'F11', 'Ctrl+Shift+S', 'Ctrl+R', 'Space'
+        ]
+        
+        if hotkey in sp_shortcuts:
+            reply = QtWidgets.QMessageBox.question(
+                self, "Possible Conflict",
+                f"Hotkey '{hotkey}' might conflict with a Substance Painter shortcut.\n" +
+                f"Continue anyway?",
+                QtWidgets.QMessageBox.StandardButton.Yes | QtWidgets.QMessageBox.StandardButton.No
+            )
+            return reply != QtWidgets.QMessageBox.StandardButton.Yes
+        
+        return False  # No conflict
+    
+    def register_macro_hotkey(self, macro_name, hotkey):
+        """Register a hotkey for a macro"""
+        try:
+            # Get main window for global shortcut
+            main_window = substance_painter.ui.get_main_window()
+            
+            # Create QAction for the hotkey
+            action = QtGui.QAction(f"Execute {macro_name}", main_window)
+            action.setShortcut(QtGui.QKeySequence(hotkey))
+            
+            # Connect to macro execution
+            action.triggered.connect(lambda: self.execute_macro_by_name(macro_name))
+            
+            # Add to main window for global access
+            main_window.addAction(action)
+            
+            # Store the action for later cleanup
+            self.macro_actions[macro_name] = action
+            
+            self.log(f"Registered hotkey '{hotkey}' for macro '{macro_name}'")
+            
+        except Exception as e:
+            self.log(f"Failed to register hotkey '{hotkey}' for macro '{macro_name}': {e}")
+            QtWidgets.QMessageBox.warning(
+                self, "Hotkey Registration Failed",
+                f"Could not register hotkey '{hotkey}' for macro '{macro_name}'.\n" +
+                f"The macro will still work via Commander interface."
+            )
+    
+    def unregister_macro_hotkey(self, macro_name):
+        """Unregister a macro's hotkey"""
+        try:
+            if macro_name in self.macro_actions:
+                action = self.macro_actions[macro_name]
+                
+                # Remove from main window
+                main_window = substance_painter.ui.get_main_window()
+                main_window.removeAction(action)
+                
+                # Clean up
+                action.deleteLater()
+                del self.macro_actions[macro_name]
+                
+                self.log(f"Unregistered hotkey for macro '{macro_name}'")
+                
+        except Exception as e:
+            self.log(f"Failed to unregister hotkey for macro '{macro_name}': {e}")
+    
+    def execute_macro_by_name(self, macro_name):
+        """Execute a macro by name (called by hotkey)"""
+        if macro_name in self.macros:
+            self.log(f"Executing macro '{macro_name}' via hotkey")
+            self.execute_macro(macro_name)  # Pass the name, not the data
+        else:
+            self.log(f"Macro '{macro_name}' not found")
     
     def on_single_click(self, item):
         """Handle single-click for macro creation"""
@@ -260,12 +682,25 @@ class CommanderWidget(QtWidgets.QWidget):
             
             if command.startswith("[MACRO]"):
                 # Context menu for existing macros
-                macro_name = command[7:].strip()  # Remove "[MACRO] " prefix
+                macro_display = command[7:].strip()  # Remove "[MACRO] " prefix
+                
+                # Extract actual macro name (remove hotkey suffix if present)
+                # Format is "MacroName (Hotkey)" or just "MacroName"
+                if '(' in macro_display and macro_display.endswith(')'):
+                    # Remove hotkey suffix like "(Alt+X)"
+                    macro_name = macro_display.rsplit(' (', 1)[0].strip()
+                else:
+                    macro_name = macro_display
                 
                 rename_action = menu.addAction("Rename Macro")
                 # Store macro name for the action
                 rename_action.macro_name = macro_name
                 rename_action.triggered.connect(self._handle_rename_macro)
+                
+                edit_hotkey_action = menu.addAction("Edit Hotkey")
+                # Store macro name for the action
+                edit_hotkey_action.macro_name = macro_name
+                edit_hotkey_action.triggered.connect(self._handle_edit_macro_hotkey)
                 
                 delete_action = menu.addAction("Delete Macro")
                 # Store macro name for the action
@@ -311,6 +746,12 @@ class CommanderWidget(QtWidgets.QWidget):
         if hasattr(action, 'macro_name'):
             self.delete_macro(action.macro_name)
     
+    def _handle_edit_macro_hotkey(self):
+        """Handle edit macro hotkey action from context menu"""
+        action = self.sender()
+        if hasattr(action, 'macro_name'):
+            self.edit_macro_hotkey(action.macro_name)
+    
     def start_macro_creation(self):
         """Start macro creation mode"""
         self.macro_creation_mode = True
@@ -336,24 +777,21 @@ class CommanderWidget(QtWidgets.QWidget):
         self.refresh_commands()
     
     def create_macro_dialog(self):
-        """Show dialog to create a macro"""
+        """Show dialog to create a macro with hotkey assignment"""
         if len(self.selected_commands) == 0:
             QtWidgets.QMessageBox.warning(self, "No Commands", "Please select some commands first.")
             return
         
-        # Prompt for macro name
-        name, ok = QtWidgets.QInputDialog.getText(
-            self, 
-            "Create Macro", 
-            f"Name for macro with {len(self.selected_commands)} commands:\n" + 
-            "\n".join([f"• {cmd}" for cmd in self.selected_commands])
-        )
-        
-        if ok and name.strip():
-            self.create_macro(name.strip())
+        # Create custom dialog
+        dialog = MacroCreationDialog(self, self.selected_commands)
+        if dialog.exec() == QtWidgets.QDialog.DialogCode.Accepted:
+            name = dialog.get_macro_name()
+            hotkey = dialog.get_hotkey()
+            if name:
+                self.create_macro(name, hotkey)
     
-    def create_macro(self, name):
-        """Create a macro with the selected commands"""
+    def create_macro(self, name, hotkey=None):
+        """Create a macro with the selected commands and optional hotkey"""
         if name in self.macros:
             reply = QtWidgets.QMessageBox.question(
                 self, "Macro Exists", 
@@ -363,18 +801,32 @@ class CommanderWidget(QtWidgets.QWidget):
             if reply != QtWidgets.QMessageBox.StandardButton.Yes:
                 return
         
+        # Check for hotkey conflicts
+        if hotkey and self.is_hotkey_conflict(hotkey, name):
+            return
+        
+        # Unregister old hotkey if macro is being replaced
+        if name in self.macros and 'hotkey' in self.macros[name]:
+            self.unregister_macro_hotkey(name)
+        
         # Create the macro
         self.macros[name] = {
             'commands': self.selected_commands.copy(),
             'created': str(QtCore.QDateTime.currentDateTime().toString())
         }
         
+        # Add hotkey if provided
+        if hotkey:
+            self.macros[name]['hotkey'] = hotkey
+            self.register_macro_hotkey(name, hotkey)
+        
         self.save_macros()
         self.cancel_macro_creation()  # Exit macro creation mode
         self.refresh_commands()  # Refresh to show new macro
         
-        self.status_label.setText(f"Created macro: {name}")
-        self.log(f"Created macro '{name}' with {len(self.selected_commands)} commands")
+        hotkey_text = f" with hotkey {hotkey}" if hotkey else ""
+        self.status_label.setText(f"Created macro: {name}{hotkey_text}")
+        self.log(f"Created macro '{name}' with {len(self.selected_commands)} commands{hotkey_text}")
     
     def rename_macro(self, old_name):
         """Rename an existing macro"""
@@ -406,12 +858,48 @@ class CommanderWidget(QtWidgets.QWidget):
         )
         
         if reply == QtWidgets.QMessageBox.StandardButton.Yes:
+            # Unregister hotkey if it exists
+            if 'hotkey' in self.macros[name]:
+                self.unregister_macro_hotkey(name)
+            
             del self.macros[name]
             self.save_macros()
             self.refresh_commands()
             
             self.status_label.setText(f"Deleted macro: {name}")
             self.log(f"Deleted macro '{name}'")
+    
+    def edit_macro_hotkey(self, macro_name):
+        """Edit the hotkey for an existing macro"""
+        if macro_name not in self.macros:
+            return
+        
+        # Create hotkey editing dialog
+        dialog = HotkeyEditDialog(self, macro_name, self.macros[macro_name])
+        if dialog.exec() == QtWidgets.QDialog.DialogCode.Accepted:
+            new_hotkey = dialog.get_hotkey()
+            
+            # Remove old hotkey
+            if 'hotkey' in self.macros[macro_name]:
+                self.unregister_macro_hotkey(macro_name)
+            
+            # Add new hotkey if provided
+            if new_hotkey:
+                if not self.is_hotkey_conflict(new_hotkey, macro_name):
+                    self.macros[macro_name]['hotkey'] = new_hotkey
+                    self.register_macro_hotkey(macro_name, new_hotkey)
+                    self.save_macros()
+                    self.refresh_commands()
+                    self.status_label.setText(f"Updated hotkey for '{macro_name}': {new_hotkey}")
+                    self.log(f"Updated hotkey for macro '{macro_name}' to '{new_hotkey}'")
+            else:
+                # Remove hotkey
+                if 'hotkey' in self.macros[macro_name]:
+                    del self.macros[macro_name]['hotkey']
+                    self.save_macros()
+                    self.refresh_commands()
+                    self.status_label.setText(f"Removed hotkey for '{macro_name}'")
+                    self.log(f"Removed hotkey for macro '{macro_name}'")
     
     def execute_macro(self, name):
         """Execute a macro by running all its commands in sequence"""
@@ -718,10 +1206,20 @@ class CommanderWidget(QtWidgets.QWidget):
             
             # Add macros first (at top, in orange color)
             for macro_name in sorted(self.macros.keys()):
-                item = QtWidgets.QListWidgetItem(f"[MACRO] {macro_name}")
+                # Check if macro has hotkey
+                macro_data = self.macros[macro_name]
+                hotkey_text = f" ({macro_data['hotkey']})" if 'hotkey' in macro_data else ""
+                
+                item = QtWidgets.QListWidgetItem(f"[MACRO] {macro_name}{hotkey_text}")
                 item.setForeground(QtGui.QBrush(QtGui.QColor(255, 140, 0)))  # Dark orange - very readable
-                item.setToolTip(f"Macro: {len(self.macros[macro_name]['commands'])} commands\n" + 
-                               "\n".join([f"• {cmd}" for cmd in self.macros[macro_name]['commands']]))
+                
+                # Enhanced tooltip with hotkey info
+                tooltip = f"Macro: {len(macro_data['commands'])} commands"
+                if 'hotkey' in macro_data:
+                    tooltip += f"\nHotkey: {macro_data['hotkey']}"
+                tooltip += "\n" + "\n".join([f"• {cmd}" for cmd in macro_data['commands']])
+                
+                item.setToolTip(tooltip)
                 self.results_list.addItem(item)
             
             # Real layerstack commands based on actual API
@@ -737,6 +1235,7 @@ class CommanderWidget(QtWidgets.QWidget):
                 "Insert Levels Effect",         # → insert_levels_effect()
                 "Insert Filter Effect",         # → insert_filter_effect()
                 "Insert Fill Effect",           # → insert_fill() (creates FillEffectNode when in effect stack)
+                "Insert Paint Effect",          # → insert_paint() (creates PaintEffectNode when in effect stack)
                 "Insert Generator Effect",      # → insert_generator_effect()
                 "Insert Compare Mask Effect",   # → insert_compare_mask_effect()
                 "Insert Color Selection Effect", # → insert_color_selection_effect()
@@ -948,6 +1447,8 @@ class CommanderWidget(QtWidgets.QWidget):
                 return self.insert_filter_effect()
             elif command == "Insert Fill Effect":
                 return self.insert_fill_effect()
+            elif command == "Insert Paint Effect":
+                return self.insert_paint_effect()
             elif command == "Insert Generator Effect":
                 return self.insert_generator_effect()
             elif command == "Insert Compare Mask Effect":
@@ -1892,6 +2393,29 @@ class CommanderWidget(QtWidgets.QWidget):
             self.log(f"Error inserting fill effect: {e}")
             return False
     
+    def insert_paint_effect(self):
+        """Insert paint effect using real API - detects content vs mask"""
+        try:
+            selected = self.get_selected_nodes()
+            if not selected:
+                self.log("No layer selected")
+                return False
+            
+            layer = selected[0]
+            insert_pos = self.get_smart_insert_position(layer)
+            # insert_paint() creates PaintEffectNode when inserting into effect stack
+            effect = substance_painter.layerstack.insert_paint(insert_pos)
+            effect.set_name("Paint")
+            
+            stack_type = "mask" if insert_pos.node_stack == NodeStack.Mask else "content"
+            self.log(f"✓ Inserted paint effect in {stack_type}")
+            
+            return True
+            
+        except Exception as e:
+            self.log(f"Error inserting paint effect: {e}")
+            return False
+    
     def insert_generator_effect(self):
         """Insert generator effect using real API - detects content vs mask"""
         try:
@@ -2339,6 +2863,15 @@ def close_plugin():
                 MAIN_WINDOW.timer.deleteLater()
             except:
                 pass
+        
+        # Unregister all macro hotkeys
+        if MAIN_WINDOW and hasattr(MAIN_WINDOW, 'macro_actions'):
+            try:
+                for macro_name in list(MAIN_WINDOW.macro_actions.keys()):
+                    MAIN_WINDOW.unregister_macro_hotkey(macro_name)
+                substance_painter.logging.info("Unregistered all macro hotkeys")
+            except Exception as e:
+                substance_painter.logging.info(f"Error cleaning up macro hotkeys: {e}")
         
         # Clean up any active dialogs
         if MAIN_WINDOW and hasattr(MAIN_WINDOW, 'active_dialogs'):
