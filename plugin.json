@@ -1,0 +1,13 @@
+{
+    "name": "Commander",
+    "version": "1.0.0", 
+    "description": "Quick-access tool for Substance Painter layer operations",
+    "author": "Commander Plugin Team",
+    "url": "",
+    "license": "MIT",
+    "tags": ["layers", "workflow", "productivity"],
+    "substance_painter_version": "2020.1.0",
+    "python_version": "3.7",
+    "platforms": ["windows", "macos", "linux"],
+    "main_file": "__init__.py"
+}
