@@ -504,6 +504,12 @@ class CommanderWidget(QtWidgets.QWidget):
             "Set Blend Mode",              # → node.set_blending_mode()
             "Get Blend Mode",              # → node.get_blending_mode()
             
+            # === Channel Management (Real API: ActiveChannelsMixin) ===
+            "Enable BaseColor Channel",    # → layer.active_channels = {BaseColor}
+            "Enable All Channels",         # → layer.active_channels = all available
+            "Disable All Channels",        # → layer.active_channels = set()
+            "Toggle Channels",             # → interactive channel selection
+            
             # === Layer Masks (Real API: LayerNode methods) ===
             "Add Layer Mask",             # → layer.add_mask()
             "Remove Layer Mask",          # → layer.remove_mask()
@@ -689,6 +695,16 @@ class CommanderWidget(QtWidgets.QWidget):
                 self.set_blend_mode()
             elif command == "Get Blend Mode":
                 self.get_blend_mode()
+                
+            # === Channel Management ===
+            elif command == "Enable BaseColor Channel":
+                self.enable_basecolor_channel()
+            elif command == "Enable All Channels":
+                self.enable_all_channels()
+            elif command == "Disable All Channels":
+                self.disable_all_channels()
+            elif command == "Toggle Channels":
+                self.toggle_channels()
                 
             # === Mask Operations ===
             elif command == "Add Layer Mask":
@@ -1207,31 +1223,67 @@ class CommanderWidget(QtWidgets.QWidget):
     # ---- End Procedural System ----
     
     def set_layer_opacity(self):
-        """Set opacity for selected layer using official API"""
+        """Set opacity for all selected layers using official API"""
         stack = substance_painter.textureset.get_active_stack()
         selected_nodes = get_selected_nodes(stack)
         
         if selected_nodes:
-            layer = selected_nodes[0]
-            if layer.has_blending():
-                # Prompt user for opacity value
+            # Get current opacity from first layer for default value
+            first_layer = selected_nodes[0]
+            if first_layer.has_blending():
+                # Get current opacity from first layer
+                if first_layer.is_in_mask_stack():
+                    current_opacity = first_layer.get_opacity()
+                else:
+                    current_opacity = first_layer.get_opacity(ChannelType.BaseColor)
+                
+                # Show count of selected layers in dialog
+                layer_count = len(selected_nodes)
+                dialog_title = f"Set Layer Opacity ({layer_count} layer{'s' if layer_count > 1 else ''} selected)"
+                
+                # Prompt user for opacity
                 opacity, ok = QtWidgets.QInputDialog.getDouble(
-                    self, "Set Layer Opacity", "Enter opacity (0.0 - 1.0):",
-                    layer.get_opacity() if not layer.is_in_mask_stack() else layer.get_opacity(),
-                    0.0, 1.0, 2
+                    self, dialog_title, f"Enter opacity (0.0 - 1.0) for {layer_count} layer{'s' if layer_count > 1 else ''}:",
+                    current_opacity, 0.0, 1.0, 2
                 )
+                
                 if ok:
-                    if layer.is_in_mask_stack():
-                        layer.set_opacity(opacity)  # No channel needed for mask
-                        substance_painter.logging.info(f"Set mask opacity to {opacity}")
-                    else:
-                        # For content layers, prompt for channel or apply to all channels
-                        layer.set_opacity(opacity)  # This will apply to all channels if no channel specified
-                        substance_painter.logging.info(f"Set layer opacity to {opacity}")
+                    # Apply to all selected layers
+                    success_count = 0
+                    skip_count = 0
+                    
+                    for layer in selected_nodes:
+                        if layer.has_blending():
+                            try:
+                                if layer.is_in_mask_stack():
+                                    layer.set_opacity(opacity)  # No channel needed for mask
+                                else:
+                                    # Apply to all major channels
+                                    channels = [ChannelType.BaseColor, ChannelType.Roughness, ChannelType.Normal, 
+                                               ChannelType.Metallic, ChannelType.Height]
+                                    for channel in channels:
+                                        try:
+                                            layer.set_opacity(opacity, channel)
+                                        except:
+                                            pass  # Skip channels that don't exist
+                                success_count += 1
+                            except Exception as e:
+                                substance_painter.logging.warning(f"Failed to set opacity for layer '{layer.get_name()}': {e}")
+                                skip_count += 1
+                        else:
+                            skip_count += 1
+                    
+                    # Log results
+                    if success_count > 0:
+                        substance_painter.logging.info(f"Set opacity to {opacity} for {success_count} layer{'s' if success_count != 1 else ''}")
+                    if skip_count > 0:
+                        substance_painter.logging.info(f"Skipped {skip_count} layer{'s' if skip_count != 1 else ''} (no blending support)")
+                    
+                    self.status_label.setText(f"Opacity: {opacity} → {success_count} layer{'s' if success_count != 1 else ''}")
             else:
-                raise ValueError("Selected layer does not support opacity")
+                raise ValueError("First selected layer does not support opacity")
         else:
-            raise ValueError("No layer selected")
+            raise ValueError("No layers selected")
     
     def get_layer_opacity(self):
         """Get opacity of selected layer using official API"""
@@ -1241,22 +1293,30 @@ class CommanderWidget(QtWidgets.QWidget):
         if selected_nodes:
             layer = selected_nodes[0]
             if layer.has_blending():
-                opacity = layer.get_opacity() if layer.is_in_mask_stack() else layer.get_opacity()
-                substance_painter.logging.info(f"Layer '{layer.get_name()}' opacity: {opacity}")
-                self.status_label.setText(f"Layer opacity: {opacity}")
+                if layer.is_in_mask_stack():
+                    opacity = layer.get_opacity()
+                    substance_painter.logging.info(f"Mask '{layer.get_name()}' opacity: {opacity}")
+                    self.status_label.setText(f"Mask opacity: {opacity}")
+                else:
+                    # For content layers, show BaseColor channel opacity as representative
+                    opacity = layer.get_opacity(ChannelType.BaseColor)
+                    substance_painter.logging.info(f"Layer '{layer.get_name()}' opacity (BaseColor): {opacity}")
+                    self.status_label.setText(f"Layer opacity: {opacity}")
             else:
                 raise ValueError("Selected layer does not support opacity")
         else:
             raise ValueError("No layer selected")
     
     def set_blend_mode(self):
-        """Set blend mode for selected layer using official API"""
+        """Set blend mode for all selected layers using official API"""
         stack = substance_painter.textureset.get_active_stack()
         selected_nodes = get_selected_nodes(stack)
         
         if selected_nodes:
-            layer = selected_nodes[0]
-            if layer.has_blending():
+            # Get current blend mode from first layer for default selection
+            first_layer = selected_nodes[0]
+            current_index = 0
+            if first_layer.has_blending():
                 # Get available blend modes
                 blend_modes = [
                     "Normal", "PassThrough", "Disable", "Replace", "Multiply", "Divide", 
@@ -1268,17 +1328,23 @@ class CommanderWidget(QtWidgets.QWidget):
                     "NormalMapDetail", "NormalMapInverseDetail"
                 ]
                 
-                # Get current blend mode
-                current_mode = layer.get_blending_mode() if layer.is_in_mask_stack() else layer.get_blending_mode()
-                current_index = 0
+                # Get current blend mode from first layer
                 try:
+                    if first_layer.is_in_mask_stack():
+                        current_mode = first_layer.get_blending_mode()
+                    else:
+                        current_mode = first_layer.get_blending_mode(ChannelType.BaseColor)
                     current_index = blend_modes.index(current_mode.name)
                 except:
                     pass
                 
+                # Show count of selected layers in dialog
+                layer_count = len(selected_nodes)
+                dialog_title = f"Set Blend Mode ({layer_count} layer{'s' if layer_count > 1 else ''} selected)"
+                
                 # Prompt user for blend mode
                 blend_mode_name, ok = QtWidgets.QInputDialog.getItem(
-                    self, "Set Blend Mode", "Select blend mode:",
+                    self, dialog_title, f"Select blend mode to apply to {layer_count} layer{'s' if layer_count > 1 else ''}:",
                     blend_modes, current_index, False
                 )
                 
@@ -1286,16 +1352,42 @@ class CommanderWidget(QtWidgets.QWidget):
                     # Convert string to BlendingMode enum
                     blend_mode = getattr(BlendingMode, blend_mode_name)
                     
-                    if layer.is_in_mask_stack():
-                        layer.set_blending_mode(blend_mode)  # No channel needed for mask
-                        substance_painter.logging.info(f"Set mask blend mode to {blend_mode_name}")
-                    else:
-                        layer.set_blending_mode(blend_mode)  # This will apply to all channels if no channel specified
-                        substance_painter.logging.info(f"Set layer blend mode to {blend_mode_name}")
+                    # Apply to all selected layers
+                    success_count = 0
+                    skip_count = 0
+                    
+                    for layer in selected_nodes:
+                        if layer.has_blending():
+                            try:
+                                if layer.is_in_mask_stack():
+                                    layer.set_blending_mode(blend_mode)  # No channel needed for mask
+                                else:
+                                    # Apply to all major channels
+                                    channels = [ChannelType.BaseColor, ChannelType.Roughness, ChannelType.Normal, 
+                                               ChannelType.Metallic, ChannelType.Height]
+                                    for channel in channels:
+                                        try:
+                                            layer.set_blending_mode(blend_mode, channel)
+                                        except:
+                                            pass  # Skip channels that don't exist
+                                success_count += 1
+                            except Exception as e:
+                                substance_painter.logging.warning(f"Failed to set blend mode for layer '{layer.get_name()}': {e}")
+                                skip_count += 1
+                        else:
+                            skip_count += 1
+                    
+                    # Log results
+                    if success_count > 0:
+                        substance_painter.logging.info(f"Set blend mode to {blend_mode_name} for {success_count} layer{'s' if success_count != 1 else ''}")
+                    if skip_count > 0:
+                        substance_painter.logging.info(f"Skipped {skip_count} layer{'s' if skip_count != 1 else ''} (no blending support)")
+                    
+                    self.status_label.setText(f"Blend mode: {blend_mode_name} → {success_count} layer{'s' if success_count != 1 else ''}")
             else:
-                raise ValueError("Selected layer does not support blending")
+                raise ValueError("First selected layer does not support blending")
         else:
-            raise ValueError("No layer selected")
+            raise ValueError("No layers selected")
     
     def get_blend_mode(self):
         """Get blend mode of selected layer using official API"""
@@ -1305,13 +1397,452 @@ class CommanderWidget(QtWidgets.QWidget):
         if selected_nodes:
             layer = selected_nodes[0]
             if layer.has_blending():
-                blend_mode = layer.get_blending_mode() if layer.is_in_mask_stack() else layer.get_blending_mode()
-                substance_painter.logging.info(f"Layer '{layer.get_name()}' blend mode: {blend_mode.name}")
-                self.status_label.setText(f"Layer blend mode: {blend_mode.name}")
+                if layer.is_in_mask_stack():
+                    blend_mode = layer.get_blending_mode()
+                    substance_painter.logging.info(f"Mask '{layer.get_name()}' blend mode: {blend_mode.name}")
+                    self.status_label.setText(f"Mask blend mode: {blend_mode.name}")
+                else:
+                    # For content layers, show BaseColor channel blend mode as representative
+                    blend_mode = layer.get_blending_mode(ChannelType.BaseColor)
+                    substance_painter.logging.info(f"Layer '{layer.get_name()}' blend mode (BaseColor): {blend_mode.name}")
+                    self.status_label.setText(f"Layer blend mode: {blend_mode.name}")
             else:
                 raise ValueError("Selected layer does not support blending")
         else:
             raise ValueError("No layer selected")
+    
+    def rename_selected_layer(self):
+        """Rename the selected layer using official API"""
+        stack = substance_painter.textureset.get_active_stack()
+        selected_nodes = get_selected_nodes(stack)
+        
+        if selected_nodes:
+            layer = selected_nodes[0]
+            current_name = layer.get_name()
+            
+            # Prompt user for new name
+            new_name, ok = QtWidgets.QInputDialog.getText(
+                self, "Rename Layer", "Enter new layer name:",
+                QtWidgets.QLineEdit.EchoMode.Normal, current_name
+            )
+            
+            if ok and new_name.strip():
+                layer.set_name(new_name.strip())
+                substance_painter.logging.info(f"Renamed layer from '{current_name}' to '{new_name.strip()}'")
+                self.status_label.setText(f"Renamed layer to: {new_name.strip()}")
+        else:
+            raise ValueError("No layer selected")
+    
+    def toggle_layer_visibility(self):
+        """Toggle visibility of all selected layers using official API"""
+        stack = substance_painter.textureset.get_active_stack()
+        selected_nodes = get_selected_nodes(stack)
+        
+        if selected_nodes:
+            layer_count = len(selected_nodes)
+            
+            # Determine action based on first layer's visibility
+            first_layer_visible = selected_nodes[0].is_visible()
+            new_visibility = not first_layer_visible
+            
+            # Apply to all selected layers
+            for layer in selected_nodes:
+                layer.set_visible(new_visibility)
+            
+            status = "visible" if new_visibility else "hidden"
+            substance_painter.logging.info(f"Set {layer_count} layer{'s' if layer_count != 1 else ''} to {status}")
+            self.status_label.setText(f"{layer_count} layer{'s' if layer_count != 1 else ''} {status}")
+        else:
+            raise ValueError("No layers selected")
+    
+    def show_layer(self):
+        """Show all selected layers using official API"""
+        stack = substance_painter.textureset.get_active_stack()
+        selected_nodes = get_selected_nodes(stack)
+        
+        if selected_nodes:
+            layer_count = len(selected_nodes)
+            
+            # Apply to all selected layers
+            for layer in selected_nodes:
+                layer.set_visible(True)
+            
+            substance_painter.logging.info(f"Showed {layer_count} layer{'s' if layer_count != 1 else ''}")
+            self.status_label.setText(f"{layer_count} layer{'s' if layer_count != 1 else ''} shown")
+        else:
+            raise ValueError("No layers selected")
+    
+    def hide_layer(self):
+        """Hide all selected layers using official API"""
+        stack = substance_painter.textureset.get_active_stack()
+        selected_nodes = get_selected_nodes(stack)
+        
+        if selected_nodes:
+            layer_count = len(selected_nodes)
+            
+            # Apply to all selected layers
+            for layer in selected_nodes:
+                layer.set_visible(False)
+            
+            substance_painter.logging.info(f"Hid {layer_count} layer{'s' if layer_count != 1 else ''}")
+            self.status_label.setText(f"{layer_count} layer{'s' if layer_count != 1 else ''} hidden")
+        else:
+            raise ValueError("No layers selected")
+    
+    # Smart Material and Mask methods (placeholder implementations)
+    def create_smart_material(self):
+        """Create smart material from selected group - requires group layer selection"""
+        stack = substance_painter.textureset.get_active_stack()
+        selected_nodes = get_selected_nodes(stack)
+        
+        if selected_nodes:
+            layer = selected_nodes[0]
+            if hasattr(layer, 'get_type') and layer.get_type().name == 'GroupLayer':
+                # Prompt for name
+                name, ok = QtWidgets.QInputDialog.getText(
+                    self, "Create Smart Material", "Enter smart material name:"
+                )
+                if ok and name.strip():
+                    try:
+                        from substance_painter.layerstack import create_smart_material
+                        resource = create_smart_material(layer, name.strip())
+                        substance_painter.logging.info(f"Created smart material: {name.strip()}")
+                        self.status_label.setText(f"Created smart material: {name.strip()}")
+                    except Exception as e:
+                        raise ValueError(f"Failed to create smart material: {e}")
+                else:
+                    raise ValueError("Smart material name required")
+            else:
+                raise ValueError("Please select a group layer to create smart material")
+        else:
+            raise ValueError("No layer selected")
+    
+    def insert_smart_mask(self):
+        """Insert smart mask - requires smart mask resource selection"""
+        raise ValueError("Smart mask insertion requires resource selection (not implemented in minimal version)")
+    
+    def create_smart_mask(self):
+        """Create smart mask from selected layer's mask stack"""
+        stack = substance_painter.textureset.get_active_stack()
+        selected_nodes = get_selected_nodes(stack)
+        
+        if selected_nodes:
+            layer = selected_nodes[0]
+            if layer.has_mask():
+                # Prompt for name
+                name, ok = QtWidgets.QInputDialog.getText(
+                    self, "Create Smart Mask", "Enter smart mask name:"
+                )
+                if ok and name.strip():
+                    try:
+                        from substance_painter.layerstack import create_smart_mask
+                        resource = create_smart_mask(layer, name.strip())
+                        substance_painter.logging.info(f"Created smart mask: {name.strip()}")
+                        self.status_label.setText(f"Created smart mask: {name.strip()}")
+                    except Exception as e:
+                        raise ValueError(f"Failed to create smart mask: {e}")
+                else:
+                    raise ValueError("Smart mask name required")
+            else:
+                raise ValueError("Selected layer must have a mask to create smart mask")
+        else:
+            raise ValueError("No layer selected")
+    
+    # Geometry mask methods
+    def set_geometry_mask_mesh(self):
+        """Set geometry mask to mesh mode and configure mesh selection"""
+        stack = substance_painter.textureset.get_active_stack()
+        selected_nodes = get_selected_nodes(stack)
+        
+        if selected_nodes:
+            layer = selected_nodes[0]
+            if hasattr(layer, 'set_geometry_mask_type'):
+                from substance_painter.layerstack import GeometryMaskType
+                layer.set_geometry_mask_type(GeometryMaskType.Mesh)
+                substance_painter.logging.info("Set geometry mask to mesh mode")
+                self.status_label.setText("Geometry mask set to mesh mode")
+            else:
+                raise ValueError("Selected node does not support geometry masks")
+        else:
+            raise ValueError("No layer selected")
+    
+    def set_geometry_mask_uv_tile(self):
+        """Set geometry mask to UV tile mode"""
+        stack = substance_painter.textureset.get_active_stack()
+        selected_nodes = get_selected_nodes(stack)
+        
+        if selected_nodes:
+            layer = selected_nodes[0]
+            if hasattr(layer, 'set_geometry_mask_type'):
+                from substance_painter.layerstack import GeometryMaskType
+                try:
+                    layer.set_geometry_mask_type(GeometryMaskType.UVTile)
+                    substance_painter.logging.info("Set geometry mask to UV tile mode")
+                    self.status_label.setText("Geometry mask set to UV tile mode")
+                except ValueError as e:
+                    raise ValueError("UV Tile mode not supported in this project")
+            else:
+                raise ValueError("Selected node does not support geometry masks")
+        else:
+            raise ValueError("No layer selected")
+    
+    def enable_geometry_mask(self):
+        """Enable geometry mask (basic implementation)"""
+        stack = substance_painter.textureset.get_active_stack()
+        selected_nodes = get_selected_nodes(stack)
+        
+        if selected_nodes:
+            layer = selected_nodes[0]
+            if hasattr(layer, 'set_geometry_mask_type'):
+                from substance_painter.layerstack import GeometryMaskType
+                layer.set_geometry_mask_type(GeometryMaskType.Mesh)  # Default to mesh
+                substance_painter.logging.info("Enabled geometry mask")
+                self.status_label.setText("Geometry mask enabled")
+            else:
+                raise ValueError("Selected node does not support geometry masks")
+        else:
+            raise ValueError("No layer selected")
+    
+    # Projection methods
+    def set_projection_uv(self):
+        """Set projection mode to UV"""
+        stack = substance_painter.textureset.get_active_stack()
+        selected_nodes = get_selected_nodes(stack)
+        
+        if selected_nodes:
+            layer = selected_nodes[0]
+            if hasattr(layer, 'set_projection_mode'):
+                layer.set_projection_mode(ProjectionMode.UV)
+                substance_painter.logging.info("Set projection mode to UV")
+                self.status_label.setText("Projection: UV")
+            else:
+                raise ValueError("Selected layer does not support projection modes")
+        else:
+            raise ValueError("No layer selected")
+    
+    def set_projection_triplanar(self):
+        """Set projection mode to Triplanar"""
+        stack = substance_painter.textureset.get_active_stack()
+        selected_nodes = get_selected_nodes(stack)
+        
+        if selected_nodes:
+            layer = selected_nodes[0]
+            if hasattr(layer, 'set_projection_mode'):
+                layer.set_projection_mode(ProjectionMode.Triplanar)
+                substance_painter.logging.info("Set projection mode to Triplanar")
+                self.status_label.setText("Projection: Triplanar")
+            else:
+                raise ValueError("Selected layer does not support projection modes")
+        else:
+            raise ValueError("No layer selected")
+    
+    def set_projection_planar(self):
+        """Set projection mode to Planar"""
+        stack = substance_painter.textureset.get_active_stack()
+        selected_nodes = get_selected_nodes(stack)
+        
+        if selected_nodes:
+            layer = selected_nodes[0]
+            if hasattr(layer, 'set_projection_mode'):
+                layer.set_projection_mode(ProjectionMode.Planar)
+                substance_painter.logging.info("Set projection mode to Planar")
+                self.status_label.setText("Projection: Planar")
+            else:
+                raise ValueError("Selected layer does not support projection modes")
+        else:
+            raise ValueError("No layer selected")
+    
+    def set_projection_spherical(self):
+        """Set projection mode to Spherical"""
+        stack = substance_painter.textureset.get_active_stack()
+        selected_nodes = get_selected_nodes(stack)
+        
+        if selected_nodes:
+            layer = selected_nodes[0]
+            if hasattr(layer, 'set_projection_mode'):
+                layer.set_projection_mode(ProjectionMode.Spherical)
+                substance_painter.logging.info("Set projection mode to Spherical")
+                self.status_label.setText("Projection: Spherical")
+            else:
+                raise ValueError("Selected layer does not support projection modes")
+        else:
+            raise ValueError("No layer selected")
+    
+    def set_projection_cylindrical(self):
+        """Set projection mode to Cylindrical"""
+        stack = substance_painter.textureset.get_active_stack()
+        selected_nodes = get_selected_nodes(stack)
+        
+        if selected_nodes:
+            layer = selected_nodes[0]
+            if hasattr(layer, 'set_projection_mode'):
+                layer.set_projection_mode(ProjectionMode.Cylindrical)
+                substance_painter.logging.info("Set projection mode to Cylindrical")
+                self.status_label.setText("Projection: Cylindrical")
+            else:
+                raise ValueError("Selected layer does not support projection modes")
+        else:
+            raise ValueError("No layer selected")
+    
+    # Symmetry methods
+    def enable_symmetry(self):
+        """Enable symmetry on selected layer"""
+        stack = substance_painter.textureset.get_active_stack()
+        selected_nodes = get_selected_nodes(stack)
+        
+        if selected_nodes:
+            layer = selected_nodes[0]
+            if hasattr(layer, 'set_symmetry_enabled'):
+                layer.set_symmetry_enabled(True)
+                substance_painter.logging.info("Enabled symmetry")
+                self.status_label.setText("Symmetry enabled")
+            else:
+                raise ValueError("Selected layer does not support symmetry")
+        else:
+            raise ValueError("No layer selected")
+    
+    def disable_symmetry(self):
+        """Disable symmetry on selected layer"""
+        stack = substance_painter.textureset.get_active_stack()
+        selected_nodes = get_selected_nodes(stack)
+        
+        if selected_nodes:
+            layer = selected_nodes[0]
+            if hasattr(layer, 'set_symmetry_enabled'):
+                layer.set_symmetry_enabled(False)
+                substance_painter.logging.info("Disabled symmetry")
+                self.status_label.setText("Symmetry disabled")
+            else:
+                raise ValueError("Selected layer does not support symmetry")
+        else:
+            raise ValueError("No layer selected")
+    
+    # Channel Management methods
+    def enable_basecolor_channel(self):
+        """Enable BaseColor channel on selected layers"""
+        stack = substance_painter.textureset.get_active_stack()
+        selected_nodes = get_selected_nodes(stack)
+        
+        if selected_nodes:
+            success_count = 0
+            
+            for layer in selected_nodes:
+                if hasattr(layer, 'active_channels'):
+                    try:
+                        # Get available channels on the stack
+                        available_channels = set(stack.all_channels())
+                        
+                        if ChannelType.BaseColor in available_channels:
+                            # Get current active channels and add BaseColor
+                            current_channels = layer.active_channels
+                            current_channels.add(ChannelType.BaseColor)
+                            layer.active_channels = current_channels
+                            success_count += 1
+                        
+                    except Exception as e:
+                        substance_painter.logging.warning(f"Could not enable BaseColor for layer '{layer.get_name()}': {e}")
+            
+            if success_count > 0:
+                substance_painter.logging.info(f"Enabled BaseColor channel on {success_count} layer{'s' if success_count != 1 else ''}")
+                self.status_label.setText(f"BaseColor enabled on {success_count} layer{'s' if success_count != 1 else ''}")
+            else:
+                raise ValueError("No fill layers selected or BaseColor channel not available")
+        else:
+            raise ValueError("No layers selected")
+    
+    def enable_all_channels(self):
+        """Enable all available channels on selected layers"""
+        stack = substance_painter.textureset.get_active_stack()
+        selected_nodes = get_selected_nodes(stack)
+        
+        if selected_nodes:
+            success_count = 0
+            
+            for layer in selected_nodes:
+                if hasattr(layer, 'active_channels'):
+                    try:
+                        # Get all available channels on the stack
+                        available_channels = set(stack.all_channels())
+                        
+                        if available_channels:
+                            layer.active_channels = available_channels
+                            success_count += 1
+                        
+                    except Exception as e:
+                        substance_painter.logging.warning(f"Could not enable all channels for layer '{layer.get_name()}': {e}")
+            
+            if success_count > 0:
+                substance_painter.logging.info(f"Enabled all channels on {success_count} layer{'s' if success_count != 1 else ''}")
+                self.status_label.setText(f"All channels enabled on {success_count} layer{'s' if success_count != 1 else ''}")
+            else:
+                raise ValueError("No fill layers selected")
+        else:
+            raise ValueError("No layers selected")
+    
+    def disable_all_channels(self):
+        """Disable all channels on selected layers"""
+        stack = substance_painter.textureset.get_active_stack()
+        selected_nodes = get_selected_nodes(stack)
+        
+        if selected_nodes:
+            success_count = 0
+            
+            for layer in selected_nodes:
+                if hasattr(layer, 'active_channels'):
+                    try:
+                        layer.active_channels = set()  # Empty set disables all channels
+                        success_count += 1
+                        
+                    except Exception as e:
+                        substance_painter.logging.warning(f"Could not disable channels for layer '{layer.get_name()}': {e}")
+            
+            if success_count > 0:
+                substance_painter.logging.info(f"Disabled all channels on {success_count} layer{'s' if success_count != 1 else ''}")
+                self.status_label.setText(f"All channels disabled on {success_count} layer{'s' if success_count != 1 else ''}")
+            else:
+                raise ValueError("No fill layers selected")
+        else:
+            raise ValueError("No layers selected")
+    
+    def toggle_channels(self):
+        """Interactive channel selection for selected layers"""
+        stack = substance_painter.textureset.get_active_stack()
+        selected_nodes = get_selected_nodes(stack)
+        
+        if selected_nodes:
+            fill_layers = [layer for layer in selected_nodes if hasattr(layer, 'active_channels')]
+            
+            if fill_layers:
+                # Get available channels on the stack
+                available_channels = list(stack.all_channels())
+                channel_names = [ch.name for ch in available_channels]
+                
+                if not channel_names:
+                    raise ValueError("No channels available on this texture set")
+                
+                # Get currently active channels from first layer
+                first_layer = fill_layers[0]
+                active_channels = first_layer.active_channels
+                
+                # Create checkable items list for simple dialog
+                checked_indices = []
+                for i, channel in enumerate(available_channels):
+                    if channel in active_channels:
+                        checked_indices.append(i)
+                
+                # For now, show a simplified message about channel toggling
+                # (Full multi-selection dialog would require more complex QtWidgets setup)
+                layer_count = len(fill_layers)
+                active_names = [ch.name for ch in active_channels]
+                
+                message = f"Current active channels on first layer: {', '.join(active_names) if active_names else 'None'}"
+                substance_painter.logging.info(message)
+                self.status_label.setText(f"Active channels: {len(active_channels)} of {len(available_channels)}")
+                
+            else:
+                raise ValueError("No fill layers selected (only fill layers support channel management)")
+        else:
+            raise ValueError("No layers selected")
     
     def start_project_monitoring(self):
         """Start monitoring project state changes for automatic procedural loading"""
@@ -1364,6 +1895,9 @@ class CommanderWidget(QtWidgets.QWidget):
         layer = substance_painter.layerstack.insert_paint(insert_position)
         layer.set_name("Paint Layer")
         
+        # Note: Paint layers don't use the same source system as fill layers
+        # They are ready to paint on by default, no channel enabling needed
+        
         # Select the newly created layer for macro chaining
         set_selected_nodes([layer])
         substance_painter.logging.info("Created and selected paint layer")
@@ -1374,6 +1908,24 @@ class CommanderWidget(QtWidgets.QWidget):
         insert_position = InsertPosition.from_textureset_stack(stack)
         layer = substance_painter.layerstack.insert_fill(insert_position)
         layer.set_name("Fill Layer")
+        
+        # Enable BaseColor channel by default (and other common channels)
+        try:
+            # Get available channels on the stack - all_channels() returns ChannelType objects directly
+            available_channels = set(stack.all_channels())
+            
+            # Define default channels to enable
+            default_channels = {ChannelType.BaseColor}
+            
+            # Only enable channels that exist on this stack
+            channels_to_enable = default_channels.intersection(available_channels)
+            
+            if channels_to_enable:
+                layer.active_channels = channels_to_enable
+                enabled_channel_names = [ch.name for ch in channels_to_enable]
+                substance_painter.logging.info(f"Enabled channels: {', '.join(enabled_channel_names)}")
+        except Exception as e:
+            substance_painter.logging.warning(f"Could not enable default channels: {e}")
         
         # Select the newly created layer for macro chaining
         set_selected_nodes([layer])
