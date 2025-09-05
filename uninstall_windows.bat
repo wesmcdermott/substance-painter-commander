@@ -10,7 +10,7 @@ echo.
 REM Define paths
 set "PLUGINS_DIR=%USERPROFILE%\Documents\Adobe\Adobe Substance 3D Painter\python\plugins"
 set "COMMANDER_DIR=%PLUGINS_DIR%\commander"
-set "MACROS_DIR=%USERPROFILE%\.substance_painter_commander"
+set "MACROS_DIR=%USERPROFILE%\AppData\Local\Commander"
 
 echo 🔍 Checking for Commander installation...
 
@@ -44,7 +44,7 @@ REM Ask about macros
 set "REMOVE_MACROS=false"
 if exist "%MACROS_DIR%" (
     echo.
-    set /p "MACRO_REPLY=🔄 Do you also want to remove saved macros? (y/N): "
+    set /p "MACRO_REPLY=🔄 Do you also want to remove saved macros ^& hotkeys? (y/N): "
     
     if /i "%MACRO_REPLY%"=="y" (
         set "REMOVE_MACROS=true"
@@ -88,7 +88,7 @@ if not exist "%COMMANDER_DIR%" (
     echo.
     echo 🔄 Next steps:
     echo    1. Restart Substance Painter
-    echo    2. Commander shortcuts and toolbar button will be removed
+    echo    2. Commander shortcuts and hotkeys will be removed
     
     if not "%REMOVE_MACROS%"=="true" (
         if exist "%MACROS_DIR%" (

@@ -99,14 +99,14 @@ if exist "%COMMANDER_DIR%\__init__.py" (
         echo.
         echo 🚀 Next steps:
         echo    1. Restart Substance Painter
-        echo    2. Use Ctrl+; or Ctrl+` to open Commander
-        echo    3. Look for the 'C' button in the right toolbar
+        echo    2. Use Ctrl+; to open Commander
+        echo    3. Create macros and assign hotkeys for lightning-fast workflows
         echo.
         echo 📍 Installation location:
         echo    %COMMANDER_DIR%
         echo.
-        echo 📖 Macros will be stored in:
-        echo    %USERPROFILE%\.substance_painter_commander\macros.json
+        echo 📖 Macros ^& hotkeys will be auto-stored in:
+        echo    %USERPROFILE%\AppData\Local\Commander\commander_macros.json
         echo.
         echo 🎯 For help and documentation, see README.md
     ) else (

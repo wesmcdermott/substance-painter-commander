@@ -10,7 +10,7 @@ echo ""
 # Define paths
 PLUGINS_DIR="$HOME/Documents/Adobe/Adobe Substance 3D Painter/python/plugins"
 COMMANDER_DIR="$PLUGINS_DIR/commander"
-MACROS_DIR="$HOME/.substance_painter_commander"
+MACROS_DIR="$HOME/Library/Application Support/Commander"
 
 echo "🔍 Checking for Commander installation..."
 
@@ -42,7 +42,7 @@ fi
 # Ask about macros
 if [[ -d "$MACROS_DIR" ]]; then
     echo ""
-    read -p "🔄 Do you also want to remove saved macros? (y/N): " -n 1 -r
+    read -p "🔄 Do you also want to remove saved macros & hotkeys? (y/N): " -n 1 -r
     echo ""
     
     if [[ $REPLY =~ ^[Yy]$ ]]; then
@@ -84,8 +84,8 @@ if [[ ! -d "$COMMANDER_DIR" ]]; then
     echo "✅ Commander has been successfully uninstalled!"
     echo ""
     echo "🔄 Next steps:"
-    echo "   1. Restart Substance Painter"
-    echo "   2. Commander shortcuts and toolbar button will be removed"
+    echo "   1. Restart Substance Painter"  
+    echo "   2. Commander shortcuts and hotkeys will be removed"
     
     if [[ "$REMOVE_MACROS" != true ]] && [[ -d "$MACROS_DIR" ]]; then
         echo ""

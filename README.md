@@ -2,65 +2,66 @@
 
 **Author**: Wes McDermott
 
-A powerful command palette plugin for Substance Painter with macro creation, procedural resource integration, and context-aware layer operations. Inspired by Cinema 4D's Commander with modern workflow enhancements.
+A powerful command palette plugin for Substance Painter with advanced macro creation, hotkey system, procedural resource integration, and context-aware layer operations. Inspired by Cinema 4D's Commander with modern workflow enhancements.
 
 ## ⚠️ Disclaimer
 
 This software is an independent, personal project and is provided "as is." It is not an official Adobe product, plugin, or service, and it has not been reviewed, endorsed, or supported by Adobe. Any references to Adobe software are for compatibility purposes only. Adobe and related marks are trademarks of Adobe Inc.
 
-**🎓 Learning Project Notice**: This plugin was developed as a learning exercise to explore Substance Painter's Python API and advanced Qt UI development. While functional, it is **not recommended for production use** in professional workflows. Users should thoroughly test all features in non-critical projects before considering any production implementation.
+**🎓 Learning Project Notice**: This plugin was developed as a learning exercise to explore Substance Painter's Python API and advanced Qt UI development. While fully functional and stable, users should thoroughly test all features in non-critical projects before considering any production implementation.
 
 ## 🚀 Features
 
 ### 🎯 Advanced Command Palette
-- **Instant Popup**: Appears at mouse cursor position with `Cmd+;` (macOS) or `Ctrl+;` (Windows/Linux)
-- **Smart Search**: Fuzzy search through 42+ layer operations
-- **Macro Integration**: Record, save, and execute command sequences
-- **Procedural Resources**: Browse and apply procedural noises/textures
-- **Context Awareness**: Automatically detects mask vs content context
-- **Click-away Closing**: Auto-hides when clicking outside
+- **Smart Dock Widget**: Appears at mouse cursor position with `Ctrl+;` (all platforms)
+- **Persistent & Refocusable**: Stays open until closed, refocuses on subsequent shortcuts
+- **Keyboard Navigation**: Arrow keys to navigate, Enter to execute, Escape to hide
+- **Smart Search**: Fuzzy search through 40+ layer operations and procedural resources
+- **Visual Priority**: Macros at top in golden yellow, procedurals in different colors
+- **Click-away Compatible**: Stable dock behavior without crashes
 
-### 🎬 Macro System
-- **Record Macros**: Single-click commands to build sequences
+### 🎬 Advanced Macro System
+- **Visual Creation**: Interactive command selection with golden highlighting
+- **Advanced Dialog**: Professional macro creation with command preview
+- **Hotkey Support**: Assign custom hotkeys (F5, Ctrl+Shift+W, Alt+Q, etc.)
+- **Conflict Detection**: Smart hotkey conflict resolution with user choices  
+- **Context Menu**: Right-click macros for Execute, Add/Remove Hotkey, Delete
+- **Persistent Storage**: Macros with hotkeys saved to JSON file
+- **Global Execution**: Hotkeys work anywhere in Substance Painter
 - **Smart Execution**: Commands execute in proper order with context awareness
-- **Persistent Storage**: Macros saved to `~/.substance_painter_commander/macros.json`
-- **Easy Management**: Right-click to rename or delete macros
-- **Visual Feedback**: Orange text for macros, yellow selection highlights
-- **Context-Aware**: Mask operations automatically switch selection context
 
 ### 🎨 Procedural Resources
-- **Library Integration**: Access Substance Painter's procedural shelf
+- **Library Integration**: Access Substance Painter's complete procedural shelf
 - **Smart Application**: Procedurals apply to Roughness channel on content, grayscale on masks
-- **Macro Compatible**: Include procedurals in macro sequences
-- **Visual Distinction**: Cornflower blue `[PROC]` prefix for easy identification
+- **Macro Compatible**: Include procedurals in macro sequences for complex workflows
+- **Visual Distinction**: Clear `[PROC]` prefix for easy identification
 - **Intelligent Fallbacks**: Multiple channel assignment strategies
 
 ### 🔧 Enhanced Layer Operations
 - **Smart Fill Layers**: Created with BaseColor channel only by default
-- **Context-Aware Masks**: Add Layer Mask switches to mask context for subsequent operations
+- **Context-Aware Masks**: Add Layer Mask switches to mask context automatically
 - **Proper Selection**: Layer creation automatically selects new layers
-- **Insert Effects**: Fill, Filter, Generator, Levels, and specialized effects
+- **Effect System**: Fill, Filter, Generator, Levels, and specialized effects
 - **Channel Control**: Fine-grained control over active channels
+- **Error Handling**: Clear feedback for operation failures
 
-### 🎪 Dual Access Methods
-- **Keyboard**: `Cmd+;` & `Cmd+`` (macOS) or `Ctrl+;` & `Ctrl+`` (Windows/Linux)
-- **Toolbar Button**: Custom "C" icon in right toolbar for mouse users
-- **Consistent Styling**: Dark theme with proper visual feedback
+### 🎪 User Experience
+- **Single Shortcut**: `Ctrl+;` opens Commander (cross-platform consistency)
+- **Keyboard First**: Full keyboard navigation without mouse dependency
+- **Persistent Interface**: No auto-hiding, stays open until manually closed
+- **Refocus Behavior**: Shortcut refocuses search when already open
+- **Status Feedback**: Real-time operation status and command counts
 
 ## Installation
 
 ### 🚀 Automated Installation (Recommended)
 
-**macOS/Linux:**
+**All Platforms:**
 1. Download and extract the Commander plugin
-2. Open Terminal and navigate to the commander folder
-3. Run: `./install_macos.sh`
-4. Restart Substance Painter
-
-**Windows:**
-1. Download and extract the Commander plugin  
-2. Double-click `install_windows.bat`
-3. Follow the prompts
+2. Open Terminal/Command Prompt and navigate to the commander folder
+3. Run the appropriate installer:
+   - **macOS/Linux**: `./install_macos.sh` 
+   - **Windows**: `install_windows.bat`
 4. Restart Substance Painter
 
 ### 📁 Manual Installation
@@ -74,80 +75,93 @@ If you prefer manual installation:
 
 2. Restart Substance Painter
 
-3. Access via `Cmd+;` (macOS) or `Ctrl+;` (Windows/Linux) keyboard shortcut or toolbar button
+3. Access via `Ctrl+;` keyboard shortcut
 
 ### 🗑️ Uninstallation
 
 **Automated Removal:**
 - **macOS/Linux**: Run `./uninstall_macos.sh` from the installed plugin directory
 - **Windows**: Run `uninstall_windows.bat` from the installed plugin directory
-- Choose whether to preserve or remove your saved macros
+- Choose whether to preserve or remove your saved macros and hotkeys
 
 **Manual Removal:**
 - Delete the `commander` folder from your plugins directory
-- Optionally delete `~/.substance_painter_commander/` (macros)
+- Optionally delete macro storage directory (see Macro Storage section)
 
 ## 🎮 Usage
 
 ### Opening Commander
-- **Keyboard**: `Cmd+;` & `Cmd+`` (macOS) or `Ctrl+;` & `Ctrl+`` (Windows/Linux)
-- **Toolbar**: Click the "C" button in right toolbar
-- **Result**: Popup appears at mouse cursor position
+- **Primary Shortcut**: `Ctrl+;` (all platforms - consistent experience)
+- **Behavior**: Dock widget appears at mouse cursor, floating above other panels
+- **Persistence**: Stays open until manually closed with Escape
 
 ### Basic Operations
-1. **Search**: Type to filter commands (e.g., "fill", "mask", "proc")
-2. **Navigate**: Arrow keys or mouse to select
-3. **Execute**: Double-click or press Enter
-4. **Close**: Escape or click outside
+1. **Open**: Press `Ctrl+;` - appears at mouse cursor position
+2. **Search**: Type to filter commands (e.g., "fill", "mask", "proc") 
+3. **Navigate**: Use ↑/↓ arrow keys to select items
+4. **Execute**: Press Enter or double-click to execute
+5. **Close**: Press Escape to hide
+6. **Refocus**: Press `Ctrl+;` again to refocus search field when already open
 
-### Creating Macros
-1. **Start Recording**: Right-click any regular command → "Start Macro Creation"
-2. **Select Commands**: Single-click commands to add them (yellow highlight)
-3. **Deselect**: Click again to remove from macro
-4. **Save**: Right-click → "Create Macro" → enter name
-5. **Execute**: Double-click macro or press Enter
+### Creating Advanced Macros
+1. **Start Recording**: Click "Start Macro" button
+2. **Select Commands**: Single-click commands to add them (golden yellow highlight)
+3. **Toggle Selection**: Click again to remove commands from macro
+4. **Create Macro**: Click "Finish Macro" button
+5. **Advanced Dialog**: 
+   - Enter macro name in dedicated field
+   - Optionally record hotkey by clicking "Record Hotkey" and pressing keys
+   - View command preview in scrollable list
+   - Handle conflicts automatically
+6. **Global Access**: Use assigned hotkeys anywhere in Substance Painter
+
+### Macro Management
+- **Execute**: Double-click macro name or press Enter
+- **Hotkey Management**: Right-click macro → "Add Hotkey" or "Remove Hotkey"
+- **Delete**: Right-click macro → "Delete Macro"
+- **Single Command Macros**: Right-click any command → "Create Macro from this Command"
 
 ### Using Procedurals
-1. **Find**: Search for procedural names (e.g., "noise", "grunge")
-2. **Apply**: Double-click `[PROC]` items to apply
-3. **Context**: Applies to Roughness on content layers, grayscale on masks
-4. **Macros**: Include in macro sequences for complex effects
+1. **Find**: Search for procedural names (e.g., "noise", "grunge", "pattern")
+2. **Apply**: Double-click `[PROC]` items to apply to selected layer
+3. **Context**: Automatically applies to appropriate channels based on selection
+4. **Macros**: Include in macro sequences for repeatable complex effects
 
 ## 💾 Macro Storage
 
 ### Storage Location
-Macros are automatically saved to your user directory in a dedicated Commander folder:
+Macros and hotkeys are automatically saved to:
 
-- **Windows**: `C:\Users\[username]\.substance_painter_commander\macros.json`
-- **macOS**: `~/.substance_painter_commander/macros.json` 
-- **Linux**: `~/.substance_painter_commander/macros.json`
+- **Windows**: `%USERPROFILE%\AppData\Local\Commander\commander_macros.json`
+- **macOS**: `~/Library/Application Support/Commander/commander_macros.json`
+- **Linux**: `~/.local/share/Commander/commander_macros.json`
+- **Fallback**: `~/commander_macros.json` (if standard locations unavailable)
 
 ### File Format
-- **Format**: JSON (human-readable text format)
-- **Structure**: Each macro contains a name and array of commands
-- **Persistence**: Automatically saved when macros are created/modified
-- **Portability**: Can be copied between machines/users
-
-### Backup & Restore
-- **Backup**: Copy the `macros.json` file to save your macros
-- **Restore**: Place a saved `macros.json` file in the Commander directory
-- **Share**: Send `macros.json` files to other users to share macro collections
-- **Reset**: Delete `macros.json` to start fresh (restart Substance Painter)
-
-### Example File Structure
 ```json
 {
-  "My Weathering Setup": [
-    "Create Fill Layer",
-    "Add Layer Mask", 
-    "[PROC] Grunge Brushed Metal"
-  ],
-  "Quick Paint Setup": [
-    "Create Paint Layer",
-    "Set Layer Opacity"
-  ]
+  "My Weathering Setup": {
+    "commands": [
+      "Create Fill Layer",
+      "Add Layer Mask", 
+      "[PROC] Grunge Brushed Metal"
+    ],
+    "hotkey": "F5"
+  },
+  "Quick Paint Setup": {
+    "commands": [
+      "Create Paint Layer",
+      "Set Layer Opacity"
+    ]
+  }
 }
 ```
+
+### Backup & Restore
+- **Backup**: Copy the `commander_macros.json` file to preserve macros and hotkeys
+- **Restore**: Place saved file in the storage location
+- **Share**: Send files to other users to share macro collections
+- **Reset**: Delete the JSON file to start fresh
 
 ## 📋 Available Commands
 
@@ -188,99 +202,145 @@ Macros are automatically saved to your user directory in a dedicated Commander f
 ### Mask Operations
 | Command | Description | Notes |
 |---------|-------------|-------|
-| Add Layer Mask | Add layer mask | Switches to mask context |
+| Add Layer Mask | Add layer mask | Switches to mask context automatically |
 | Remove Layer Mask | Delete layer mask | Returns to content context |
 | Enable Layer Mask | Enable mask effect | Maintains mask context |
 | Disable Layer Mask | Disable mask effect | Maintains mask context |
-| Set Mask Background White | White mask background | Reveals content |
-| Set Mask Background Black | Black mask background | Hides content |
+
+### Smart Materials & Resources
+| Command | Description | Context |
+|---------|-------------|---------|
+| Insert Smart Material | Apply smart material | Content layers |
+| Create Smart Material | Create from selection | Selected layers |
+| Insert Smart Mask | Apply smart mask | Mask context |
+| Create Smart Mask | Create from mask | Selected mask |
 
 ### Procedural Resources (`[PROC]` prefix)
 | Type | Description | Application |
 |------|-------------|-------------|
-| Procedural Noises | Perlin, Simplex, etc. | Roughness/grayscale |
-| Grunge Textures | Wear, dirt, scratches | Roughness/grayscale |
-| Pattern Generators | Geometric patterns | Roughness/grayscale |
+| Procedural Noises | Perlin, Simplex, Cellular, etc. | Roughness/grayscale channels |
+| Grunge Textures | Wear, dirt, scratches, damage | Roughness/grayscale channels |
+| Pattern Generators | Geometric, organic patterns | Roughness/grayscale channels |
+| Material Effects | Surface treatments | Context-appropriate channels |
 
 ### Macros (`[MACRO]` prefix)
-| Feature | Description | Usage |
-|---------|-------------|-------|
-| User-Created | Custom command sequences | Right-click to manage |
-| Context-Aware | Proper mask/content handling | Automatic context switching |
-| Persistent | Saved between sessions | Stored in user directory |
+- **Display**: Golden yellow text at top of list
+- **Hotkeys**: Shown in parentheses when assigned: `[MACRO] My Macro (F5)`
+- **Management**: Right-click for Execute, hotkey management, and Delete
+- **Creation**: Advanced dialog with hotkey recording and conflict detection
 
 ## ⌨️ Keyboard Shortcuts
 
-- **`Cmd+;` (macOS) or `Ctrl+;` (Windows/Linux)**: Open Commander (primary)
-- **`Cmd+`` (macOS) or `Ctrl+`` (Windows/Linux)**: Open Commander (alternative)
+### Global Shortcuts
+- **`Ctrl+;`**: Open/refocus Commander (primary, cross-platform)
+
+### Commander Interface
 - **`Enter`**: Execute selected command/macro
-- **`Escape`**: Close Commander popup
-- **`↑/↓`**: Navigate command list
-- **`Type`**: Filter commands/macros/procedurals
+- **`Escape`**: Hide Commander dock
+- **`↑/↓`**: Navigate command list (visible items only)
+- **`Type`**: Filter commands/macros/procedurals in real-time
+
+### Macro Hotkeys
+- **User-Defined**: F1-F12, Ctrl+Key, Alt+Key, Shift+Key combinations
+- **Global**: Work anywhere in Substance Painter
+- **Conflict Detection**: Automatic detection and resolution of duplicate assignments
 
 ## 🧠 Smart Features
 
 ### Context Awareness
-- **Mask Selection**: Operations apply to mask stack (grayscale)
-- **Content Selection**: Operations apply to content stack (channeled)
-- **Auto-Switching**: Add Layer Mask switches to mask context
-- **Channel Intelligence**: Procedurals choose appropriate channels
+- **Mask Selection**: Operations apply to mask stack (grayscale channels)
+- **Content Selection**: Operations apply to content stack (color channels)
+- **Auto-Switching**: Add Layer Mask automatically switches to mask context
+- **Channel Intelligence**: Procedurals choose appropriate channels based on context
+
+### Advanced Macro System
+- **Hotkey Recording**: Click "Record Hotkey" and press key combination
+- **Conflict Resolution**: Smart detection of duplicate hotkeys with user choice
+- **Global Registration**: Hotkeys work throughout Substance Painter
+- **Persistent Storage**: Hotkeys saved with macros and restored on plugin load
+- **Context Menu**: Right-click management for all macro operations
 
 ### Visual Feedback
-- **Macro Creation**: Yellow highlights for selected commands
-- **Command Types**: Orange macros, blue procedurals, white commands  
-- **Selection**: Dark gray background with high contrast text
-- **Status Updates**: Real-time feedback in status bar
+- **Golden Yellow**: Macros at top of list for priority access
+- **Selection Highlighting**: Golden yellow for selected commands during creation
+- **Status Updates**: Real-time feedback for operations and macro actions
+- **Hotkey Display**: Clear indication of assigned hotkeys in macro names
+- **Error Messages**: Descriptive feedback for failed operations
 
-### Smart Defaults
-- **Fill Layers**: BaseColor channel only (cleaner workflow)
-- **Layer Selection**: New layers auto-selected for chaining operations
-- **Insertion Logic**: Context-aware positioning in layer stack
+### Smart Interface
+- **Cursor Positioning**: Appears at mouse location for quick access  
+- **Persistent Display**: No auto-hiding, stays open until dismissed
+- **Refocus Behavior**: Subsequent shortcuts refocus search field
+- **Keyboard Navigation**: Full operation without mouse dependency
+- **Smart Search**: Instant filtering with fuzzy matching
 
 ## 🔧 Troubleshooting
 
 ### Commander doesn't appear
 - Check plugin folder location is correct
-- Restart Substance Painter completely
-- Try both shortcuts: `Cmd+;` & `Cmd+`` (macOS) or `Ctrl+;` & `Ctrl+`` (Windows/Linux)
+- Restart Substance Painter completely  
+- Try the shortcut: `Ctrl+;`
 - Check Console (Windows → Console) for Python errors
+- Verify plugin.json is present and valid
 
 ### Macro issues
-- Ensure commands execute in proper order
-- Some operations require specific layer types
-- Check that previous command completed successfully
-- Verify project is open and layers exist
+- Ensure commands execute in proper order within macros
+- Some operations require specific layer types or contexts
+- Check that previous command completed successfully before next executes
+- Verify project is open and appropriate layers exist
+- Check Console for macro execution errors
+
+### Hotkey problems
+- Verify hotkey isn't conflicting with Substance Painter shortcuts
+- Check Console for hotkey registration errors
+- Try removing and re-adding problematic hotkeys
+- Restart Substance Painter if hotkeys stop working
 
 ### Procedural problems  
-- Procedurals require an open project
-- Select appropriate layer/mask before applying
+- Procedurals require an open project with active texture set
+- Select appropriate layer/mask before applying procedurals
 - Some procedurals may not be compatible with all channel types
-- Check resource availability in Substance Painter shelf
+- Check resource availability in Substance Painter's shelf
+- Verify procedural resources are installed and accessible
 
 ## 🛠 Technical Details
 
-- **Framework**: PySide6/Qt6 with PySide2/Qt5 compatibility
-- **Plugin Type**: Dock widget (floating, frameless)
-- **API Usage**: Official Substance Painter Python API
-- **Storage**: JSON-based macro persistence
-- **Event System**: Qt event filtering for UI behavior
-- **Resource Integration**: Substance Painter resource system
+- **Framework**: PySide6/Qt6 with PySide2/Qt5 fallback compatibility
+- **Plugin Type**: Dock widget with popup-like positioning behavior
+- **API Usage**: Official Substance Painter Python API exclusively
+- **Storage**: JSON-based macro and hotkey persistence
+- **Event System**: Qt global shortcuts for hotkey system
+- **Resource Integration**: Native Substance Painter resource system
+- **Error Handling**: Comprehensive try-catch with user feedback
+- **Cross-Platform**: Consistent behavior on Windows, macOS, and Linux
 
 ## 📊 Version History
 
-### v2.0.0 (Current)
-- **NEW**: Complete macro recording and playback system
-- **NEW**: Procedural resource browsing and application  
-- **NEW**: Context-aware mask vs content operations
-- **NEW**: Toolbar button for mouse access
-- **ENHANCED**: Fill layers created with BaseColor only
-- **ENHANCED**: Dark theme with improved visual feedback
-- **ENHANCED**: Smart layer selection and context switching
-- **ENHANCED**: Robust error handling and user feedback
+### v3.0.0 (Current)
+- **NEW**: Advanced macro creation dialog with hotkey recording
+- **NEW**: Global hotkey system with conflict detection and resolution
+- **NEW**: Macros displayed at top in golden yellow with hotkey indicators
+- **NEW**: Comprehensive keyboard navigation with arrow keys and Enter
+- **NEW**: Right-click context menus for macro and hotkey management
+- **NEW**: Persistent dock widget behavior - no auto-hiding
+- **NEW**: Refocus behavior when shortcut pressed while already open
+- **ENHANCED**: Cross-platform `Ctrl+;` shortcut consistency
+- **ENHANCED**: Improved mask addition with proper API usage
+- **ENHANCED**: Professional macro storage with hotkey persistence
+- **ENHANCED**: Robust error handling with descriptive user feedback
+- **FIXED**: All stability issues - no crashes on quit or disable
+- **OPTIMIZED**: Single shortcut system for simplified user experience
+
+### v2.0.0 (Previous)
+- Complete macro recording and playback system
+- Procedural resource browsing and application  
+- Context-aware mask vs content operations
+- Dark theme with improved visual feedback
+- Smart layer selection and context switching
 
 ### v1.0.0 (Legacy)
 - Basic command palette interface
-- 42+ layer stack operations
+- 40+ layer stack operations
 - Popup positioning and click-away behavior
 - Keyboard-only access
 
@@ -290,7 +350,7 @@ This plugin is provided as-is for educational and productivity purposes.
 
 ---
 
-**Commander** - Streamline your Substance Painter workflow with intelligent command automation and resource integration.
+**Commander** - Streamline your Substance Painter workflow with intelligent command automation, advanced macro system, and seamless resource integration.
 
 ## 📚 Documentation
 

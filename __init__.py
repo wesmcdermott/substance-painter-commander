@@ -1,28 +1,98 @@
-# Main imports
+# --- BLACK BOX LOGGING (with permission handling) ---
+import os, sys, signal, atexit, tempfile
+import faulthandler
+
+# Try Desktop first, fallback to temp directory
+try:
+    LOG_DIR = os.path.expanduser("~/Desktop")
+    # Test write permission
+    test_file = os.path.join(LOG_DIR, "commander_test_write")
+    with open(test_file, "w") as f:
+        f.write("test")
+    os.remove(test_file)
+except (PermissionError, OSError):
+    LOG_DIR = tempfile.gettempdir()
+
+PY_LOG = os.path.join(LOG_DIR, "commander_plugin_faulthandler.log")
+QT_LOG = os.path.join(LOG_DIR, "commander_plugin_qt.log")
+
+# Python stacks on fatal signals (SEGSEGV/ABRT/BUS/ILL) - with error handling
+_fh = None
+_qt = None
+try:
+    _fh = open(PY_LOG, "w", buffering=1)
+    _fh.write("=== COMMANDER CRASH LOG STARTED ===\n")
+    _fh.flush()
+    
+    faulthandler.enable(_fh)
+    for _sig in (signal.SIGSEGV, signal.SIGABRT, signal.SIGBUS, signal.SIGILL):
+        faulthandler.register(_sig, _fh, all_threads=True)
+    def _atexit_handler():
+        if _fh:
+            _fh.write("=== ATEXIT HANDLER CALLED ===\n")
+            _fh.flush()
+        print("Commander: atexit handler called - Python process ending normally")
+    atexit.register(_atexit_handler)
+
+    # Qt messages to file
+    _qt = open(QT_LOG, "w", buffering=1)
+    _qt.write("=== COMMANDER QT LOG STARTED ===\n")
+    _qt.flush()
+    
+    def _qt_msg(mode, ctx, msg):
+        try:
+            if _qt:
+                _qt.write(f"[QT][{mode}] {msg}\n")
+                _qt.flush()  # Force immediate write
+        except Exception:
+            pass
+    
+    print(f"Commander: Crash logging initialized successfully")
+    print(f"Python log: {PY_LOG}")
+    print(f"Qt log: {QT_LOG}")
+            
+except Exception as e:
+    # Fallback: disable logging if it fails
+    print(f"Commander: Could not initialize crash logging: {e}")
+    _fh = None
+    _qt = None
+    def _qt_msg(mode, ctx, msg):
+        pass
+
+# Commander plugin with hardened popup
 from PySide6 import QtWidgets, QtCore, QtGui
-import substance_painter as sp
 import substance_painter.ui
 import substance_painter.logging
-import substance_painter.project
-import substance_painter.layerstack
-import substance_painter.textureset
-import substance_painter.resource
 import json
 import os
 
-# Import real API classes and enums
+# Install Qt message handler
+try:
+    QtCore.qInstallMessageHandler(_qt_msg)
+    print(f"Commander: Qt message handler installed, logging to: {QT_LOG if _qt else 'disabled'}")
+except Exception as e:
+    print(f"Commander: Failed to install Qt message handler: {e}")
+import substance_painter.layerstack
+import substance_painter.textureset
+import substance_painter.resource
 from substance_painter.layerstack import (
-    NodeType, MaskBackground, GeometryMaskType, ProjectionMode,
-    BlendingMode, InsertPosition, NodeStack, SelectionType, set_selection_type
+    InsertPosition, NodeStack, MaskBackground, GeometryMaskType, ProjectionMode,
+    SelectionType, delete_node, get_selected_nodes, set_selection_type,
+    insert_fill, insert_paint, insert_group, instantiate,
+    insert_levels_effect, insert_compare_mask_effect, insert_filter_effect,
+    insert_generator_effect, insert_anchor_point_effect, insert_color_selection_effect,
+    insert_smart_material, insert_smart_mask, create_smart_material, create_smart_mask
 )
 from substance_painter.textureset import ChannelType
+from substance_painter.ui import UIMode
 
-# Global widgets list - Adobe pattern
-WIDGETS = []
-MAIN_WINDOW = None
+# Global references - BACK TO STABLE DOCK WIDGET
+COMMANDER_WIDGET = None
+COMMANDER_SHORTCUT = None
+DOCK_WIDGET = None
 
 class MacroCreationDialog(QtWidgets.QDialog):
-    """Custom dialog for creating macros with hotkey assignment"""
+    """Advanced dialog for creating macros with hotkey assignment"""
     
     def __init__(self, parent, selected_commands):
         super().__init__(parent)
@@ -104,7 +174,6 @@ class MacroCreationDialog(QtWidgets.QDialog):
         button_layout.addWidget(self.create_button)
         
         layout.addLayout(button_layout)
-        
         self.setLayout(layout)
         
         # Focus on name input
@@ -131,31 +200,36 @@ class MacroCreationDialog(QtWidgets.QDialog):
                       QtCore.Qt.Key.Key_Shift, QtCore.Qt.Key.Key_Meta):
                 return False
             
-            # Build key sequence (PySide6 compatible)
-            try:
-                if modifiers:
-                    # Create QKeyCombination for PySide6
-                    key_combination = QtCore.QKeyCombination(modifiers, key)
-                    key_sequence = QtGui.QKeySequence(key_combination)
-                else:
-                    # Just the key without modifiers
-                    key_sequence = QtGui.QKeySequence(key)
-                
-                sequence_text = key_sequence.toString()
-            except Exception as e:
-                # Fallback for compatibility
-                modifier_names = []
-                if modifiers & QtCore.Qt.KeyboardModifier.ControlModifier:
-                    modifier_names.append("Ctrl")
-                if modifiers & QtCore.Qt.KeyboardModifier.AltModifier:
-                    modifier_names.append("Alt")
-                if modifiers & QtCore.Qt.KeyboardModifier.ShiftModifier:
-                    modifier_names.append("Shift")
-                if modifiers & QtCore.Qt.KeyboardModifier.MetaModifier:
-                    modifier_names.append("Meta")
-                
-                key_name = QtCore.Qt.Key(key).name.replace('Key_', '') if hasattr(QtCore.Qt.Key(key), 'name') else f"Key_{key}"
-                sequence_text = "+".join(modifier_names + [key_name]) if modifier_names else key_name
+            # Build key sequence
+            modifier_names = []
+            if modifiers & QtCore.Qt.KeyboardModifier.ControlModifier:
+                modifier_names.append("Ctrl")
+            if modifiers & QtCore.Qt.KeyboardModifier.AltModifier:
+                modifier_names.append("Alt")
+            if modifiers & QtCore.Qt.KeyboardModifier.ShiftModifier:
+                modifier_names.append("Shift")
+            if modifiers & QtCore.Qt.KeyboardModifier.MetaModifier:
+                modifier_names.append("Meta")
+            
+            # Get key name
+            key_name = ""
+            if key == QtCore.Qt.Key.Key_F1: key_name = "F1"
+            elif key == QtCore.Qt.Key.Key_F2: key_name = "F2"
+            elif key == QtCore.Qt.Key.Key_F3: key_name = "F3"
+            elif key == QtCore.Qt.Key.Key_F4: key_name = "F4"
+            elif key == QtCore.Qt.Key.Key_F5: key_name = "F5"
+            elif key == QtCore.Qt.Key.Key_F6: key_name = "F6"
+            elif key == QtCore.Qt.Key.Key_F7: key_name = "F7"
+            elif key == QtCore.Qt.Key.Key_F8: key_name = "F8"
+            elif key == QtCore.Qt.Key.Key_F9: key_name = "F9"
+            elif key == QtCore.Qt.Key.Key_F10: key_name = "F10"
+            elif key == QtCore.Qt.Key.Key_F11: key_name = "F11"
+            elif key == QtCore.Qt.Key.Key_F12: key_name = "F12"
+            else:
+                # Convert to character
+                key_name = QtGui.QKeySequence(key).toString()
+            
+            sequence_text = "+".join(modifier_names + [key_name]) if modifier_names else key_name
             
             if sequence_text:
                 self.hotkey_sequence = sequence_text
@@ -172,360 +246,478 @@ class MacroCreationDialog(QtWidgets.QDialog):
         return False
     
     def clear_hotkey(self):
-        """Clear the hotkey assignment"""
+        """Clear the hotkey"""
         self.hotkey_sequence = None
-        self.hotkey_input.setText("")
+        self.hotkey_input.clear()
     
     def get_macro_name(self):
-        """Get the entered macro name"""
+        """Get the macro name"""
         return self.name_input.text().strip()
     
     def get_hotkey(self):
-        """Get the assigned hotkey"""
-        return self.hotkey_sequence
-    
-    def accept(self):
-        """Validate and accept the dialog"""
-        name = self.get_macro_name()
-        if not name:
-            QtWidgets.QMessageBox.warning(self, "Missing Name", "Please enter a macro name.")
-            return
-        
-        super().accept()
-
-class HotkeyEditDialog(QtWidgets.QDialog):
-    """Dialog for editing hotkeys of existing macros"""
-    
-    def __init__(self, parent, macro_name, macro_data):
-        super().__init__(parent)
-        self.macro_name = macro_name
-        self.macro_data = macro_data
-        self.hotkey_sequence = macro_data.get('hotkey', None)
-        self.setupUI()
-    
-    def setupUI(self):
-        """Setup the dialog UI"""
-        self.setWindowTitle(f"Edit Hotkey - {self.macro_name}")
-        self.setModal(True)
-        self.resize(350, 200)
-        
-        layout = QtWidgets.QVBoxLayout()
-        
-        # Macro info
-        info_label = QtWidgets.QLabel(f"Macro: {self.macro_name}")
-        info_label.setStyleSheet("font-weight: bold; font-size: 14px;")
-        layout.addWidget(info_label)
-        
-        commands_label = QtWidgets.QLabel(f"{len(self.macro_data['commands'])} commands")
-        commands_label.setStyleSheet("color: #888; margin-bottom: 15px;")
-        layout.addWidget(commands_label)
-        
-        # Current hotkey
-        current_label = QtWidgets.QLabel("Current hotkey:")
-        current_label.setStyleSheet("font-weight: bold;")
-        layout.addWidget(current_label)
-        
-        current_hotkey = self.macro_data.get('hotkey', 'None')
-        current_display = QtWidgets.QLabel(current_hotkey)
-        current_display.setStyleSheet("background: #333; padding: 5px; border-radius: 3px; margin-bottom: 10px;")
-        layout.addWidget(current_display)
-        
-        # New hotkey assignment
-        new_label = QtWidgets.QLabel("New hotkey:")
-        new_label.setStyleSheet("font-weight: bold;")
-        layout.addWidget(new_label)
-        
-        hotkey_layout = QtWidgets.QHBoxLayout()
-        
-        self.hotkey_input = QtWidgets.QLineEdit()
-        self.hotkey_input.setReadOnly(True)
-        self.hotkey_input.setPlaceholderText("Click 'Record' to set new hotkey...")
-        if self.hotkey_sequence:
-            self.hotkey_input.setText(self.hotkey_sequence)
-        hotkey_layout.addWidget(self.hotkey_input)
-        
-        self.record_button = QtWidgets.QPushButton("Record")
-        self.record_button.clicked.connect(self.record_hotkey)
-        hotkey_layout.addWidget(self.record_button)
-        
-        self.clear_button = QtWidgets.QPushButton("Remove")
-        self.clear_button.clicked.connect(self.clear_hotkey)
-        hotkey_layout.addWidget(self.clear_button)
-        
-        layout.addLayout(hotkey_layout)
-        
-        # Buttons
-        button_layout = QtWidgets.QHBoxLayout()
-        button_layout.addStretch()
-        
-        cancel_button = QtWidgets.QPushButton("Cancel")
-        cancel_button.clicked.connect(self.reject)
-        button_layout.addWidget(cancel_button)
-        
-        save_button = QtWidgets.QPushButton("Save")
-        save_button.clicked.connect(self.accept)
-        save_button.setDefault(True)
-        button_layout.addWidget(save_button)
-        
-        layout.addLayout(button_layout)
-        
-        self.setLayout(layout)
-    
-    def record_hotkey(self):
-        """Record a hotkey sequence"""
-        self.record_button.setText("Press keys...")
-        self.record_button.setEnabled(False)
-        self.hotkey_input.setText("Listening for keys...")
-        
-        # Install event filter to capture key sequence
-        self.installEventFilter(self)
-        self.grabKeyboard()
-    
-    def eventFilter(self, obj, event):
-        """Capture keyboard events for hotkey recording"""
-        if event.type() == QtCore.QEvent.Type.KeyPress:
-            key = event.key()
-            modifiers = event.modifiers()
-            
-            # Ignore standalone modifier keys
-            if key in (QtCore.Qt.Key.Key_Control, QtCore.Qt.Key.Key_Alt, 
-                      QtCore.Qt.Key.Key_Shift, QtCore.Qt.Key.Key_Meta):
-                return False
-            
-            # Build key sequence (PySide6 compatible)
-            try:
-                if modifiers:
-                    # Create QKeyCombination for PySide6
-                    key_combination = QtCore.QKeyCombination(modifiers, key)
-                    key_sequence = QtGui.QKeySequence(key_combination)
-                else:
-                    # Just the key without modifiers
-                    key_sequence = QtGui.QKeySequence(key)
-                
-                sequence_text = key_sequence.toString()
-            except Exception as e:
-                # Fallback for compatibility
-                modifier_names = []
-                if modifiers & QtCore.Qt.KeyboardModifier.ControlModifier:
-                    modifier_names.append("Ctrl")
-                if modifiers & QtCore.Qt.KeyboardModifier.AltModifier:
-                    modifier_names.append("Alt")
-                if modifiers & QtCore.Qt.KeyboardModifier.ShiftModifier:
-                    modifier_names.append("Shift")
-                if modifiers & QtCore.Qt.KeyboardModifier.MetaModifier:
-                    modifier_names.append("Meta")
-                
-                key_name = QtCore.Qt.Key(key).name.replace('Key_', '') if hasattr(QtCore.Qt.Key(key), 'name') else f"Key_{key}"
-                sequence_text = "+".join(modifier_names + [key_name]) if modifier_names else key_name
-            
-            if sequence_text:
-                self.hotkey_sequence = sequence_text
-                self.hotkey_input.setText(sequence_text)
-            
-            # Stop recording
-            self.releaseKeyboard()
-            self.removeEventFilter(self)
-            self.record_button.setText("Record")
-            self.record_button.setEnabled(True)
-            
-            return True
-        
-        return False
-    
-    def clear_hotkey(self):
-        """Clear the hotkey assignment"""
-        self.hotkey_sequence = None
-        self.hotkey_input.setText("")
-    
-    def get_hotkey(self):
-        """Get the assigned hotkey"""
+        """Get the hotkey"""
         return self.hotkey_sequence
 
 class CommanderWidget(QtWidgets.QWidget):
+    """Stable dock widget - no crashes!"""
+
     def __init__(self, parent=None):
         super().__init__(parent)
         
-        # Set proper object name and title for dock widget (required by SP API)
-        self.setObjectName("CommanderWidget")
+        # Set required properties for dock widget
+        self.setObjectName("CommanderWidget") 
         self.setWindowTitle("Commander")
         
-        # Macro system variables
-        self.macro_creation_mode = False
-        self.selected_commands = []  # Commands selected for macro creation
-        self.macros = {}  # Stored macros
-        self.macro_actions = {}  # QAction objects for macro hotkeys
-        self.macros_file = self._get_macros_file_path()
-        self.load_macros()
-        
-        # Create a native-style Commander icon to match SP's toolbar
-        try:
-            # Create a 16x16 icon that matches SP's monochrome style
-            pixmap = QtGui.QPixmap(16, 16)
-            pixmap.fill(QtCore.Qt.GlobalColor.transparent)
-            
-            painter = QtGui.QPainter(pixmap)
-            painter.setRenderHint(QtGui.QPainter.RenderHint.Antialiasing)
-            
-            # Use monochrome colors like other SP icons
-            gray_color = QtGui.QColor(180, 180, 180)  # Light gray like other icons
-            
-            # Draw a clean "C" for Commander in monochrome style
-            painter.setPen(QtGui.QPen(gray_color, 2))
-            painter.setBrush(QtCore.Qt.BrushStyle.NoBrush)
-            
-            # Draw "C" shape using arc - clean and simple
-            rect = QtCore.QRect(4, 3, 8, 10)  # Rectangle for the C shape
-            painter.drawArc(rect, 30 * 16, 300 * 16)  # Arc from 30° to 330° (300° span)
-            
-            painter.end()
-            
-            icon = QtGui.QIcon(pixmap)
-            self.setWindowIcon(icon)
-            
-        except Exception as e:
-            # Fallback: no icon (dock widget will work without it, just no quick button)
-            pass
-        
-        # Set size policies to allow flexible resizing like other SP panels
-        self.setSizePolicy(QtWidgets.QSizePolicy.Policy.Preferred, QtWidgets.QSizePolicy.Policy.Preferred)
-        
-        # Set minimum size instead of fixed size
-        self.setMinimumSize(QtCore.QSize(300, 400))
-        
-        # Set initial preferred size
-        self.resize(400, 500)
-        
-        # Simple layout - following Adobe pattern
+        # Simple layout
         layout = QtWidgets.QVBoxLayout()
-        
-        # No title - cleaner interface
         
         # Search input
         self.search_input = QtWidgets.QLineEdit()
-        self.search_input.setPlaceholderText("Search commands...")
+        self.search_input.setPlaceholderText("Search commands and procedurals...")
         layout.addWidget(self.search_input)
         
-        # Simple results list
+        # Results list 
         self.results_list = QtWidgets.QListWidget()
         layout.addWidget(self.results_list)
         
-        # Status label
-        self.status_label = QtWidgets.QLabel("Plugin loaded")
-        self.status_label.setStyleSheet("color: white; margin-bottom: 10px;")
-        layout.addWidget(self.status_label)
+        # Macro controls
+        macro_layout = QtWidgets.QHBoxLayout()
         
-        # No buttons - double-click to execute, auto-refresh on search
+        self.create_macro_button = QtWidgets.QPushButton("Create Macro")
+        self.create_macro_button.clicked.connect(self.start_macro_creation)
+        macro_layout.addWidget(self.create_macro_button)
+        
+        self.cancel_macro_button = QtWidgets.QPushButton("Cancel")
+        self.cancel_macro_button.clicked.connect(self.cancel_macro_creation)
+        self.cancel_macro_button.setVisible(False)
+        macro_layout.addWidget(self.cancel_macro_button)
+        
+        layout.addLayout(macro_layout)
+        
+        # Status label
+        self.status_label = QtWidgets.QLabel("Ready")
+        layout.addWidget(self.status_label)
         
         self.setLayout(layout)
         
-        # Connect search
+        # Connect events
         self.search_input.textChanged.connect(self.on_search_changed)
-        
-        # Connect double-click to execute
-        self.results_list.itemDoubleClicked.connect(self.on_double_click_execute)
-        
-        # Connect single-click for macro creation
+        self.results_list.itemDoubleClicked.connect(self.on_item_double_clicked)
         self.results_list.itemClicked.connect(self.on_single_click)
         
-        # Enable right-click context menu
-        self.results_list.setContextMenuPolicy(QtCore.Qt.ContextMenuPolicy.CustomContextMenu)
+        # Install event filter on search input to capture arrow keys
+        self.search_input.installEventFilter(self)
+        
+        # Context menu
+        self.results_list.setContextMenuPolicy(QtCore.Qt.CustomContextMenu)
         self.results_list.customContextMenuRequested.connect(self.show_context_menu)
         
-        # Set up keyboard shortcuts
-        self.setup_keyboard_shortcuts()
+        # Initialize macro system BEFORE refreshing commands (since refresh_commands uses self.macros)
+        self.macro_creation_mode = False
+        self.selected_commands = []
+        self.macros = {}
+        self.macros_file = self._get_macros_file_path()
+        self.load_macros()
         
-        # Initial population
+        # Initialize with commands (now that macros are loaded)
         self.refresh_commands()
     
-    def get_procedural_resources(self):
-        """Get list of available procedural resources"""
-        try:
-            # First try to get all resources and filter by usage
-            self.log("Searching for procedural resources...")
-            all_resources = substance_painter.resource.search("")  # Get all resources
+    def eventFilter(self, obj, event):
+        """Event filter to intercept key events from search input"""
+        if obj == self.search_input and event.type() == QtCore.QEvent.Type.KeyPress:
+            key = event.key()
             
-            procedurals = []
-            for resource in all_resources:
-                try:
-                    # Check if this resource has procedural usage
-                    if hasattr(resource, 'usages'):
-                        usages = resource.usages()
-                        # Check if Usage.PROCEDURAL is in the usages
-                        if substance_painter.resource.Usage.PROCEDURAL in usages:
-                            identifier = resource.identifier()
-                            procedurals.append({
-                                'name': resource.gui_name(),
-                                'category': resource.category() if hasattr(resource, 'category') else 'Unknown',
-                                'resource_id': identifier,
-                                'resource': resource
-                            })
-                except Exception as e:
-                    # Skip resources that cause errors
-                    continue
-            
-            self.log(f"Found {len(procedurals)} procedural resources")
-            return procedurals
-            
-        except Exception as e:
-            self.log(f"Error searching for procedural resources: {e}")
-            # Try alternative approach - search by specific query
-            try:
-                self.log("Trying alternative search method...")
-                # Try different query formats
-                for query in ["procedural", "type:procedural", "*"]:
-                    try:
-                        resources = substance_painter.resource.search(query)
-                        self.log(f"Query '{query}' returned {len(resources)} resources")
-                        if len(resources) > 0:
-                            # Just return first few as test
-                            return [{
-                                'name': f"Test Resource {i}",
-                                'category': 'Test',
-                                'resource_id': None,
-                                'resource': resource
-                            } for i, resource in enumerate(resources[:3])]
-                    except Exception as query_error:
-                        self.log(f"Query '{query}' failed: {query_error}")
-                        continue
-                        
-            except Exception as alt_error:
-                self.log(f"Alternative search also failed: {alt_error}")
+            if key == QtCore.Qt.Key_Down:
+                # Down arrow pressed in search field - jump to results
+                self._jump_to_results()
+                return True  # Event handled
+            elif key == QtCore.Qt.Key_Up:
+                # Up arrow in search field - also jump to results (last item)
+                self._jump_to_results(select_last=True)
+                return True  # Event handled
+            elif key == QtCore.Qt.Key_Return or key == QtCore.Qt.Key_Enter:
+                # Enter in search field - execute first visible item
+                if self.results_list.count() > 0:
+                    for i in range(self.results_list.count()):
+                        item = self.results_list.item(i)
+                        if not item.isHidden():
+                            self.on_item_double_clicked(item)
+                            break
+                return True  # Event handled
                 
-            return []
-    
-    def _update_selection_styling(self):
-        """Update list widget selection styling based on macro creation mode"""
-        try:
-            if self.macro_creation_mode:
-                # Light yellow selection background for macro creation mode
-                selection_style = "selection-background-color: #fffacd; selection-color: #333;"  # Light yellow with dark text
-            else:
-                # Normal dark gray selection background
-                selection_style = "selection-background-color: #404040; selection-color: white;"  # Dark gray with white text
+        # Pass the event to the parent class
+        return super().eventFilter(obj, event)
+        
+    def keyPressEvent(self, event):
+        """Enhanced key press handler for results list navigation"""
+        key = event.key()
+        
+        if key == QtCore.Qt.Key_Escape:
+            # Hide dock on ESC
+            global DOCK_WIDGET
+            if DOCK_WIDGET:
+                DOCK_WIDGET.hide()
+                
+        elif key == QtCore.Qt.Key_Down and self.results_list.hasFocus():
+            # Arrow down in results - navigate to next item
+            self._navigate_results(1)
             
-            # Apply just the selection styling to the list widget
-            self.results_list.setStyleSheet(f"""
-                QListWidget {{
-                    background-color: #2b2b2b;
-                    border: 1px solid #555;
-                    color: white;
-                    {selection_style}
-                }}
-            """)
+        elif key == QtCore.Qt.Key_Up and self.results_list.hasFocus():
+            # Arrow up in results - navigate to previous item
+            self._navigate_results(-1)
+            
+        elif key == QtCore.Qt.Key_Return or key == QtCore.Qt.Key_Enter:
+            # Enter key - execute selected command
+            if self.results_list.hasFocus():
+                current_item = self.results_list.currentItem()
+                if current_item:
+                    self.on_item_double_clicked(current_item)
+            
+        else:
+            # For any other key, make sure search input gets focus for typing
+            if not self.search_input.hasFocus() and event.text().isprintable():
+                self.search_input.setFocus()
+                # Re-send the key event to the search input
+                QtWidgets.QApplication.sendEvent(self.search_input, event)
+                return
+            super().keyPressEvent(event)
+    
+    def _navigate_results(self, direction):
+        """Navigate through visible items only (direction: 1 for down, -1 for up)"""
+        if self.results_list.count() == 0:
+            return
+            
+        # Get list of visible rows
+        visible_rows = []
+        for i in range(self.results_list.count()):
+            if not self.results_list.item(i).isHidden():
+                visible_rows.append(i)
+        
+        if not visible_rows:
+            return
+            
+        # Find current position in visible items
+        current_row = self.results_list.currentRow()
+        try:
+            current_visible_index = visible_rows.index(current_row)
+        except ValueError:
+            # Current row not visible, start from first/last
+            current_visible_index = 0 if direction > 0 else len(visible_rows) - 1
+        else:
+            # Move to next/previous visible item
+            current_visible_index += direction
+            
+        # Wrap around if needed
+        if current_visible_index >= len(visible_rows):
+            current_visible_index = 0
+        elif current_visible_index < 0:
+            current_visible_index = len(visible_rows) - 1
+            
+        # Select the new row
+        new_row = visible_rows[current_visible_index]
+        self.results_list.setCurrentRow(new_row)
+        
+        # Scroll to make sure it's visible
+        self.results_list.scrollToItem(self.results_list.item(new_row))
+        
+        # Focus stays on results list for continued navigation
+    
+    def _jump_to_results(self, select_last=False):
+        """Jump from search field to results list and select first/last visible item"""
+        if self.results_list.count() == 0:
+            return
+            
+        # Find visible items
+        visible_items = []
+        for i in range(self.results_list.count()):
+            item = self.results_list.item(i)
+            if not item.isHidden():
+                visible_items.append((i, item))
+        
+        if not visible_items:
+            return
+            
+        # Select first or last visible item
+        if select_last:
+            index, item = visible_items[-1]  # Last visible item
+        else:
+            index, item = visible_items[0]   # First visible item
+            
+        self.results_list.setCurrentItem(item)
+        self.results_list.scrollToItem(item)
+        self.results_list.setFocus()
+    
+    
+    # ---- Core Commander functionality ----
+    
+    def refresh_commands(self):
+        """Populate the list with ALL available layer commands from API"""
+        self.results_list.clear()
+        
+        commands = [
+            # === Layer Creation (Real API: insert_*) ===
+            "Create Paint Layer",           # → insert_paint()
+            "Create Fill Layer",            # → insert_fill()
+            "Create Group Layer",           # → insert_group()
+            "Create Layer Instance",        # → instantiate()
+            
+            # === Effect Creation (Real API: insert_*_effect) ===
+            "Insert Levels Effect",         # → insert_levels_effect()
+            "Insert Filter Effect",         # → insert_filter_effect()
+            "Insert Fill Effect",           # → insert_fill() (creates FillEffectNode when in effect stack)
+            "Insert Paint Effect",          # → insert_paint() (creates PaintEffectNode when in effect stack)
+            "Insert Generator Effect",      # → insert_generator_effect()
+            "Insert Compare Mask Effect",   # → insert_compare_mask_effect()
+            "Insert Color Selection Effect", # → insert_color_selection_effect()
+            "Insert Anchor Point Effect",   # → insert_anchor_point_effect()
+            
+            # === Layer Management (Real API) ===
+            "Delete Selected Layers",      # → delete_node()
+            "Rename Selected Layer",       # → node.set_name()
+            
+            # === Layer Properties (Real API: Node methods) ===
+            "Toggle Layer Visibility",     # → node.set_visible()
+            "Show Layer",                  # → node.set_visible(True)
+            "Hide Layer",                  # → node.set_visible(False)
+            "Set Layer Opacity",          # → node.set_opacity()
+            "Get Layer Opacity",          # → node.get_opacity()
+            "Set Blend Mode",              # → node.set_blending_mode()
+            "Get Blend Mode",              # → node.get_blending_mode()
+            
+            # === Layer Masks (Real API: LayerNode methods) ===
+            "Add Layer Mask",             # → layer.add_mask()
+            "Remove Layer Mask",          # → layer.remove_mask()
+            "Enable Layer Mask",          # → layer.enable_mask(True)
+            "Disable Layer Mask",         # → layer.enable_mask(False)
+            "Set Mask Background White",  # → layer.set_mask_background(MaskBackground.White)
+            "Set Mask Background Black",  # → layer.set_mask_background(MaskBackground.Black)
+            
+            # === Smart Materials/Masks (Real API) ===
+            "Insert Smart Material",      # → insert_smart_material()
+            "Create Smart Material",      # → create_smart_material()
+            "Insert Smart Mask",          # → insert_smart_mask()
+            "Create Smart Mask",          # → create_smart_mask()
+            
+            # === Geometry Masks (Real API: LayerNode methods) ===
+            "Set Geometry Mask Mesh",     # → layer.set_geometry_mask_type(GeometryMaskType.Mesh)
+            "Set Geometry Mask UV Tile",  # → layer.set_geometry_mask_type(GeometryMaskType.UVTile)
+            "Enable Geometry Mask",       # → layer.set_geometry_mask_enabled_meshes()
+            
+            # === Projection Modes (Real API: FillParamsEditorMixin) ===
+            "Set Projection UV",          # → layer.set_projection_mode(ProjectionMode.UV)
+            "Set Projection Triplanar",   # → layer.set_projection_mode(ProjectionMode.Triplanar)
+            "Set Projection Planar",      # → layer.set_projection_mode(ProjectionMode.Planar)
+            "Set Projection Spherical",   # → layer.set_projection_mode(ProjectionMode.Spherical)
+            "Set Projection Cylindrical", # → layer.set_projection_mode(ProjectionMode.Cylindrical)
+            "Enable Symmetry",            # → layer.set_symmetry_enabled(True)
+            "Disable Symmetry"            # → layer.set_symmetry_enabled(False)
+        ]
+        
+        for cmd in commands:
+            self.results_list.addItem(cmd)
+        
+        # Add procedural resources below layerstack commands
+        procedural_count = 0
+        try:
+            substance_painter.logging.info("Commander: Loading procedural resources...")
+            procedurals = self.get_procedural_resources()
+            substance_painter.logging.info(f"Commander: Found {len(procedurals)} procedural resources")
+            for procedural in procedurals:
+                item = QtWidgets.QListWidgetItem(f"[PROC] {procedural['name']}")
+                item.setForeground(QtGui.QBrush(QtGui.QColor(100, 149, 237)))  # Cornflower blue
+                item.setToolTip(f"Procedural: {procedural.get('category', 'Unknown')}\nApplies to Roughness channel")
+                # Store the resource identifier for later use
+                item.setData(QtCore.Qt.UserRole, procedural)
+                self.results_list.addItem(item)
+                procedural_count += 1
         except Exception as e:
-            self.log(f"Error updating selection styling: {e}")
+            substance_painter.logging.error(f"Commander: Error loading procedural resources: {e}")
+            import traceback
+            substance_painter.logging.error(f"Commander: Traceback: {traceback.format_exc()}")
+        
+        # Add macros to the list FIRST (at the top) in yellow
+        macro_count = 0
+        for macro_name, macro_data in self.macros.items():
+            # Display macro with hotkey if it has one
+            hotkey_suffix = f" ({macro_data['hotkey']})" if 'hotkey' in macro_data else ""
+            display_text = f"[MACRO] {macro_name}{hotkey_suffix}"
+            
+            item = QtWidgets.QListWidgetItem(display_text)
+            item.setForeground(QtGui.QBrush(QtGui.QColor(255, 215, 0)))  # Golden yellow
+            self.results_list.insertItem(macro_count, item)  # Insert at top
+            macro_count += 1
+        
+        total_items = len(commands) + procedural_count + macro_count
+        self.status_label.setText(f"Found {total_items} items ({len(commands)} commands, {procedural_count} procedurals, {macro_count} macros)")
+    
+    def on_search_changed(self, text):
+        """Filter commands based on search and auto-select first visible item"""
+        first_visible_item = None
+        
+        for i in range(self.results_list.count()):
+            item = self.results_list.item(i)
+            is_match = text.lower() in item.text().lower()
+            item.setHidden(not is_match)
+            
+            # Track first visible item for auto-selection
+            if is_match and first_visible_item is None:
+                first_visible_item = item
+        
+        # Auto-select first visible item for easy arrow navigation
+        if first_visible_item:
+            self.results_list.setCurrentItem(first_visible_item)
+        else:
+            self.results_list.setCurrentItem(None)
+    
+    def on_item_double_clicked(self, item):
+        """Execute the selected command using official API functions"""
+        global DOCK_WIDGET
+        command = item.text()
+        
+        try:
+            # Handle macro execution
+            if command.startswith("[MACRO]"):
+                macro_name = command[7:].strip()  # Remove "[MACRO] " prefix
+                self.execute_macro(macro_name)
+                return
+            
+            # Handle procedural resources
+            elif command.startswith("[PROC]"):
+                procedural_data = item.data(QtCore.Qt.UserRole)
+                if procedural_data:
+                    result = self.apply_procedural(procedural_data)
+                    self.status_label.setText(result)
+                    # Keep dock open after procedural execution - user can use shortcut to refocus
+                else:
+                    raise ValueError("No procedural data found")
+                return
+            
+            # === Layer Creation Commands ===
+            if command == "Create Paint Layer":
+                self.create_paint_layer()
+            elif command == "Create Fill Layer":
+                self.create_fill_layer()
+            elif command == "Create Group Layer":
+                self.create_group_layer()
+            elif command == "Create Layer Instance":
+                self.create_instance_layer()
+                
+            # === Effect Commands ===  
+            elif command == "Insert Fill Effect":
+                self.insert_fill_effect()
+            elif command == "Insert Paint Effect":
+                self.insert_paint_effect()
+            elif command == "Insert Levels Effect":
+                self.insert_levels_effect()
+            elif command == "Insert Compare Mask Effect":
+                self.insert_compare_mask_effect()
+            elif command == "Insert Filter Effect":
+                self.insert_filter_effect()
+            elif command == "Insert Generator Effect":
+                self.insert_generator_effect()
+            elif command == "Insert Anchor Point Effect":
+                self.insert_anchor_point_effect()
+            elif command == "Insert Color Selection Effect":
+                self.insert_color_selection_effect()
+                
+            # === Layer Management ===
+            elif command == "Delete Selected Layers":
+                self.delete_selected()
+            elif command == "Rename Selected Layer":
+                self.rename_selected_layer()
+                
+            # === Layer Properties ===
+            elif command == "Toggle Layer Visibility":
+                self.toggle_layer_visibility()
+            elif command == "Show Layer":
+                self.show_layer()
+            elif command == "Hide Layer":
+                self.hide_layer()
+            elif command == "Set Layer Opacity":
+                self.set_layer_opacity()
+            elif command == "Get Layer Opacity":
+                self.get_layer_opacity()
+            elif command == "Set Blend Mode":
+                self.set_blend_mode()
+            elif command == "Get Blend Mode":
+                self.get_blend_mode()
+                
+            # === Mask Operations ===
+            elif command == "Add Layer Mask":
+                self.add_layer_mask()
+            elif command == "Remove Layer Mask":
+                self.remove_layer_mask()
+            elif command == "Enable Layer Mask":
+                self.enable_layer_mask()
+            elif command == "Disable Layer Mask":
+                self.disable_layer_mask()
+            elif command == "Set Mask Background White":
+                self.set_mask_white()
+            elif command == "Set Mask Background Black":
+                self.set_mask_black()
+                
+            # === Smart Materials/Masks ===
+            elif command == "Insert Smart Material":
+                self.insert_smart_material()
+            elif command == "Create Smart Material":
+                self.create_smart_material()
+            elif command == "Insert Smart Mask":
+                self.insert_smart_mask()
+            elif command == "Create Smart Mask":
+                self.create_smart_mask()
+                
+            # === Geometry Masks ===
+            elif command == "Set Geometry Mask Mesh":
+                self.set_geometry_mask_mesh()
+            elif command == "Set Geometry Mask UV Tile":
+                self.set_geometry_mask_uv_tile()
+            elif command == "Enable Geometry Mask":
+                self.enable_geometry_mask()
+                
+            # === Projection Modes ===
+            elif command == "Set Projection UV":
+                self.set_projection_uv()
+            elif command == "Set Projection Triplanar":
+                self.set_projection_triplanar()
+            elif command == "Set Projection Planar":
+                self.set_projection_planar()
+            elif command == "Set Projection Spherical":
+                self.set_projection_spherical()
+            elif command == "Set Projection Cylindrical":
+                self.set_projection_cylindrical()
+            elif command == "Enable Symmetry":
+                self.enable_symmetry()
+            elif command == "Disable Symmetry":
+                self.disable_symmetry()
+                
+            # === Selection ===
+            elif command == "Select Content":
+                self.select_content()
+            elif command == "Select Mask":
+                self.select_mask()
+            elif command == "Select Properties":
+                self.select_properties()
+            else:
+                raise ValueError(f"Unknown command: {command}")
+                
+            self.status_label.setText(f"✓ Executed: {command}")
+            # Keep dock open after execution - user can use shortcut to refocus
+            
+        except Exception as e:
+            self.status_label.setText(f"✗ Failed: {command}")
+            substance_painter.logging.error(f"Command failed: {e}")
+    
+    # ---- Macro System Methods ----
     
     def _get_macros_file_path(self):
-        """Get the path for storing macros"""
+        """Get the path for the macros file"""
         try:
-            # Try to use user home directory
-            home_dir = os.path.expanduser("~")
-            commander_dir = os.path.join(home_dir, ".substance_painter_commander")
-            os.makedirs(commander_dir, exist_ok=True)
-            return os.path.join(commander_dir, "macros.json")
+            import substance_painter.application
+            app_data = substance_painter.application.application_data_folder()
+            return os.path.join(app_data, "commander_macros.json")
         except:
-            # Fallback to temp directory
-            return os.path.join(os.path.expanduser("~"), "commander_macros.json")
+            # Fallback to user home directory
+            return os.path.expanduser("~/commander_macros.json")
     
     def load_macros(self):
         """Load macros from file and register their hotkeys"""
@@ -541,12 +733,12 @@ class CommanderWidget(QtWidgets.QWidget):
                         self.register_macro_hotkey(macro_name, macro_data['hotkey'])
                         hotkey_count += 1
                 
-                self.log(f"Loaded {len(self.macros)} macros ({hotkey_count} with hotkeys)")
+                substance_painter.logging.info(f"Loaded {len(self.macros)} macros ({hotkey_count} with hotkeys)")
             else:
                 self.macros = {}
-                self.log("No macros file found, starting with empty macros")
+                substance_painter.logging.info("No macros file found, starting with empty macros")
         except Exception as e:
-            self.log(f"Failed to load macros: {str(e)}")
+            substance_painter.logging.error(f"Failed to load macros: {str(e)}")
             self.macros = {}
     
     def save_macros(self):
@@ -554,9 +746,9 @@ class CommanderWidget(QtWidgets.QWidget):
         try:
             with open(self.macros_file, 'w') as f:
                 json.dump(self.macros, f, indent=2)
-            self.log(f"Saved {len(self.macros)} macros")
+            substance_painter.logging.info(f"Saved {len(self.macros)} macros")
         except Exception as e:
-            self.log(f"Failed to save macros: {str(e)}")
+            substance_painter.logging.error(f"Failed to save macros: {str(e)}")
     
     def is_hotkey_conflict(self, hotkey, macro_name):
         """Check if hotkey conflicts with existing assignments"""
@@ -578,7 +770,7 @@ class CommanderWidget(QtWidgets.QWidget):
                     else:
                         return True  # Conflict, user declined to resolve
         
-        # Check against known Substance Painter shortcuts (basic ones)
+        # Check against known Substance Painter shortcuts
         sp_shortcuts = [
             'Ctrl+N', 'Ctrl+O', 'Ctrl+S', 'Ctrl+Z', 'Ctrl+Y', 'Ctrl+C', 'Ctrl+V', 'Ctrl+X',
             'Ctrl+A', 'F1', 'F11', 'Ctrl+Shift+S', 'Ctrl+R', 'Space'
@@ -586,9 +778,9 @@ class CommanderWidget(QtWidgets.QWidget):
         
         if hotkey in sp_shortcuts:
             reply = QtWidgets.QMessageBox.question(
-                self, "Possible Conflict",
-                f"Hotkey '{hotkey}' might conflict with a Substance Painter shortcut.\n" +
-                f"Continue anyway?",
+                self, "Potential Conflict",
+                f"Hotkey '{hotkey}' might conflict with Substance Painter.\n" +
+                "Use it anyway?",
                 QtWidgets.QMessageBox.StandardButton.Yes | QtWidgets.QMessageBox.StandardButton.No
             )
             return reply != QtWidgets.QMessageBox.StandardButton.Yes
@@ -598,191 +790,77 @@ class CommanderWidget(QtWidgets.QWidget):
     def register_macro_hotkey(self, macro_name, hotkey):
         """Register a hotkey for a macro"""
         try:
-            # Get main window for global shortcut
+            # Create QShortcut and connect to macro execution
             main_window = substance_painter.ui.get_main_window()
+            shortcut = QtGui.QShortcut(QtGui.QKeySequence(hotkey), main_window)
+            shortcut.activated.connect(lambda: self.execute_macro_by_name(macro_name))
             
-            # Create QAction for the hotkey
-            action = QtGui.QAction(f"Execute {macro_name}", main_window)
-            action.setShortcut(QtGui.QKeySequence(hotkey))
+            # Store shortcut reference for later cleanup
+            if not hasattr(self, 'macro_shortcuts'):
+                self.macro_shortcuts = {}
+            self.macro_shortcuts[macro_name] = shortcut
             
-            # Connect to macro execution
-            action.triggered.connect(lambda: self.execute_macro_by_name(macro_name))
-            
-            # Add to main window for global access
-            main_window.addAction(action)
-            
-            # Store the action for later cleanup
-            self.macro_actions[macro_name] = action
-            
-            self.log(f"Registered hotkey '{hotkey}' for macro '{macro_name}'")
-            
+            substance_painter.logging.info(f"Registered hotkey '{hotkey}' for macro '{macro_name}'")
         except Exception as e:
-            self.log(f"Failed to register hotkey '{hotkey}' for macro '{macro_name}': {e}")
-            QtWidgets.QMessageBox.warning(
-                self, "Hotkey Registration Failed",
-                f"Could not register hotkey '{hotkey}' for macro '{macro_name}'.\n" +
-                f"The macro will still work via Commander interface."
-            )
+            substance_painter.logging.error(f"Failed to register hotkey for macro '{macro_name}': {e}")
     
     def unregister_macro_hotkey(self, macro_name):
-        """Unregister a macro's hotkey"""
+        """Unregister a hotkey for a macro"""
         try:
-            if macro_name in self.macro_actions:
-                action = self.macro_actions[macro_name]
-                
-                # Remove from main window
-                main_window = substance_painter.ui.get_main_window()
-                main_window.removeAction(action)
-                
-                # Clean up
-                action.deleteLater()
-                del self.macro_actions[macro_name]
-                
-                self.log(f"Unregistered hotkey for macro '{macro_name}'")
-                
+            if hasattr(self, 'macro_shortcuts') and macro_name in self.macro_shortcuts:
+                shortcut = self.macro_shortcuts[macro_name]
+                shortcut.activated.disconnect()
+                shortcut.setParent(None)
+                shortcut.deleteLater()
+                del self.macro_shortcuts[macro_name]
+                substance_painter.logging.info(f"Unregistered hotkey for macro '{macro_name}'")
         except Exception as e:
-            self.log(f"Failed to unregister hotkey for macro '{macro_name}': {e}")
+            substance_painter.logging.error(f"Failed to unregister hotkey for macro '{macro_name}': {e}")
     
     def execute_macro_by_name(self, macro_name):
         """Execute a macro by name (called by hotkey)"""
         if macro_name in self.macros:
-            self.log(f"Executing macro '{macro_name}' via hotkey")
-            self.execute_macro(macro_name)  # Pass the name, not the data
+            substance_painter.logging.info(f"Executing macro '{macro_name}' via hotkey")
+            self.execute_macro(macro_name)
         else:
-            self.log(f"Macro '{macro_name}' not found")
-    
-    def on_single_click(self, item):
-        """Handle single-click for macro creation"""
-        if self.macro_creation_mode:
-            command = item.text()
-            
-            # Skip macro items themselves (can't add macros to macros)
-            if command.startswith("[MACRO]"):
-                return
-            
-            # Toggle selection
-            if command in self.selected_commands:
-                self.selected_commands.remove(command)
-                # Remove visual feedback - restore to normal white text
-                item.setForeground(QtGui.QBrush(QtCore.Qt.GlobalColor.white))
-            else:
-                self.selected_commands.append(command)
-                # Add visual feedback (different text color)
-                item.setForeground(QtGui.QBrush(QtGui.QColor(255, 215, 0)))  # Golden yellow - much more readable
-            
-            self.status_label.setText(f"Macro Mode: {len(self.selected_commands)} commands selected")
-    
-    def show_context_menu(self, position):
-        """Show right-click context menu"""
-        item = self.results_list.itemAt(position)
-        menu = QtWidgets.QMenu(self)
-        
-        if item:
-            command = item.text()
-            
-            if command.startswith("[MACRO]"):
-                # Context menu for existing macros
-                macro_display = command[7:].strip()  # Remove "[MACRO] " prefix
-                
-                # Extract actual macro name (remove hotkey suffix if present)
-                # Format is "MacroName (Hotkey)" or just "MacroName"
-                if '(' in macro_display and macro_display.endswith(')'):
-                    # Remove hotkey suffix like "(Alt+X)"
-                    macro_name = macro_display.rsplit(' (', 1)[0].strip()
-                else:
-                    macro_name = macro_display
-                
-                rename_action = menu.addAction("Rename Macro")
-                # Store macro name for the action
-                rename_action.macro_name = macro_name
-                rename_action.triggered.connect(self._handle_rename_macro)
-                
-                edit_hotkey_action = menu.addAction("Edit Hotkey")
-                # Store macro name for the action
-                edit_hotkey_action.macro_name = macro_name
-                edit_hotkey_action.triggered.connect(self._handle_edit_macro_hotkey)
-                
-                delete_action = menu.addAction("Delete Macro")
-                # Store macro name for the action
-                delete_action.macro_name = macro_name
-                delete_action.triggered.connect(self._handle_delete_macro)
-            else:
-                # Context menu for regular commands
-                if not self.macro_creation_mode:
-                    start_macro_action = menu.addAction("Start Macro Creation")
-                    start_macro_action.triggered.connect(self.start_macro_creation)
-                else:
-                    if len(self.selected_commands) > 0:
-                        create_macro_action = menu.addAction(f"Create Macro ({len(self.selected_commands)} commands)")
-                        create_macro_action.triggered.connect(self.create_macro_dialog)
-                    
-                    cancel_macro_action = menu.addAction("Cancel Macro Creation")
-                    cancel_macro_action.triggered.connect(self.cancel_macro_creation)
-        else:
-            # Context menu for empty area
-            if not self.macro_creation_mode:
-                start_macro_action = menu.addAction("Start Macro Creation")
-                start_macro_action.triggered.connect(self.start_macro_creation)
-            else:
-                if len(self.selected_commands) > 0:
-                    create_macro_action = menu.addAction(f"Create Macro ({len(self.selected_commands)} commands)")
-                    create_macro_action.triggered.connect(self.create_macro_dialog)
-                
-                cancel_macro_action = menu.addAction("Cancel Macro Creation")
-                cancel_macro_action.triggered.connect(self.cancel_macro_creation)
-        
-        if not menu.isEmpty():
-            menu.exec(self.results_list.mapToGlobal(position))
-    
-    def _handle_rename_macro(self):
-        """Handle rename macro action from context menu"""
-        action = self.sender()
-        if hasattr(action, 'macro_name'):
-            self.rename_macro(action.macro_name)
-    
-    def _handle_delete_macro(self):
-        """Handle delete macro action from context menu"""
-        action = self.sender()
-        if hasattr(action, 'macro_name'):
-            self.delete_macro(action.macro_name)
-    
-    def _handle_edit_macro_hotkey(self):
-        """Handle edit macro hotkey action from context menu"""
-        action = self.sender()
-        if hasattr(action, 'macro_name'):
-            self.edit_macro_hotkey(action.macro_name)
+            substance_painter.logging.error(f"Macro '{macro_name}' not found")
     
     def start_macro_creation(self):
         """Start macro creation mode"""
         self.macro_creation_mode = True
         self.selected_commands = []
-        self.status_label.setText("Macro Creation Mode: Click commands to select, right-click to create")
-        self.log("Started macro creation mode")
+        self.status_label.setText("Macro Creation Mode: Click commands to select")
+        substance_painter.logging.info("Started macro creation mode")
         
-        # Update selection styling to light yellow for macro creation mode
-        self._update_selection_styling()
+        # Update UI
+        self.create_macro_button.setText("Done Selecting")
+        self.create_macro_button.clicked.disconnect()
+        self.create_macro_button.clicked.connect(self.finish_macro_creation)
+        self.cancel_macro_button.setVisible(True)
     
     def cancel_macro_creation(self):
         """Cancel macro creation mode"""
         self.macro_creation_mode = False
         self.selected_commands = []
         self.status_label.setText("Macro creation cancelled")
-        self.log("Cancelled macro creation mode")
+        substance_painter.logging.info("Cancelled macro creation mode")
         
-        # Update selection styling back to normal dark gray
-        self._update_selection_styling()
+        # Reset UI
+        self.create_macro_button.setText("Create Macro")
+        self.create_macro_button.clicked.disconnect()
+        self.create_macro_button.clicked.connect(self.start_macro_creation)
+        self.cancel_macro_button.setVisible(False)
         
-        # Simply refresh the entire command list to restore proper colors
-        # This ensures macros get their blue color back and regular commands are reset
+        # Refresh to restore normal colors
         self.refresh_commands()
     
-    def create_macro_dialog(self):
-        """Show dialog to create a macro with hotkey assignment"""
+    def finish_macro_creation(self):
+        """Finish selecting commands and create macro"""
         if len(self.selected_commands) == 0:
             QtWidgets.QMessageBox.warning(self, "No Commands", "Please select some commands first.")
             return
         
-        # Create custom dialog
+        # Use advanced macro creation dialog
         dialog = MacroCreationDialog(self, self.selected_commands)
         if dialog.exec() == QtWidgets.QDialog.DialogCode.Accepted:
             name = dialog.get_macro_name()
@@ -801,741 +879,412 @@ class CommanderWidget(QtWidgets.QWidget):
             if reply != QtWidgets.QMessageBox.StandardButton.Yes:
                 return
         
-        # Check for hotkey conflicts
+        # Check hotkey conflicts
         if hotkey and self.is_hotkey_conflict(hotkey, name):
             return
         
-        # Unregister old hotkey if macro is being replaced
-        if name in self.macros and 'hotkey' in self.macros[name]:
-            self.unregister_macro_hotkey(name)
-        
-        # Create the macro
-        self.macros[name] = {
-            'commands': self.selected_commands.copy(),
-            'created': str(QtCore.QDateTime.currentDateTime().toString())
+        # Save macro
+        macro_data = {
+            'commands': self.selected_commands.copy()
         }
-        
-        # Add hotkey if provided
         if hotkey:
-            self.macros[name]['hotkey'] = hotkey
+            macro_data['hotkey'] = hotkey
+        
+        self.macros[name] = macro_data
+        self.save_macros()
+        
+        # Register hotkey if provided
+        if hotkey:
             self.register_macro_hotkey(name, hotkey)
         
-        self.save_macros()
-        self.cancel_macro_creation()  # Exit macro creation mode
-        self.refresh_commands()  # Refresh to show new macro
+        # Reset UI
+        self.cancel_macro_creation()
         
         hotkey_text = f" with hotkey {hotkey}" if hotkey else ""
-        self.status_label.setText(f"Created macro: {name}{hotkey_text}")
-        self.log(f"Created macro '{name}' with {len(self.selected_commands)} commands{hotkey_text}")
-    
-    def rename_macro(self, old_name):
-        """Rename an existing macro"""
-        new_name, ok = QtWidgets.QInputDialog.getText(
-            self, "Rename Macro", f"New name for '{old_name}':", text=old_name
-        )
+        self.status_label.setText(f"Created macro '{name}'{hotkey_text} with {len(self.selected_commands)} commands")
+        substance_painter.logging.info(f"Created macro '{name}'{hotkey_text} with {len(self.selected_commands)} commands")
         
-        if ok and new_name.strip() and new_name.strip() != old_name:
-            new_name = new_name.strip()
+        # Refresh to show new macro
+        self.refresh_commands()
+    
+    def on_single_click(self, item):
+        """Handle single-click for macro creation"""
+        if self.macro_creation_mode:
+            command = item.text()
             
-            if new_name in self.macros:
-                QtWidgets.QMessageBox.warning(self, "Name Exists", f"Macro '{new_name}' already exists.")
+            # Skip macro items themselves
+            if command.startswith("[MACRO]"):
                 return
             
-            # Rename the macro
-            self.macros[new_name] = self.macros.pop(old_name)
-            self.save_macros()
-            self.refresh_commands()
-            
-            self.status_label.setText(f"Renamed macro to: {new_name}")
-            self.log(f"Renamed macro from '{old_name}' to '{new_name}'")
-    
-    def delete_macro(self, name):
-        """Delete an existing macro"""
-        reply = QtWidgets.QMessageBox.question(
-            self, "Delete Macro", 
-            f"Delete macro '{name}'?",
-            QtWidgets.QMessageBox.StandardButton.Yes | QtWidgets.QMessageBox.StandardButton.No
-        )
-        
-        if reply == QtWidgets.QMessageBox.StandardButton.Yes:
-            # Unregister hotkey if it exists
-            if 'hotkey' in self.macros[name]:
-                self.unregister_macro_hotkey(name)
-            
-            del self.macros[name]
-            self.save_macros()
-            self.refresh_commands()
-            
-            self.status_label.setText(f"Deleted macro: {name}")
-            self.log(f"Deleted macro '{name}'")
-    
-    def edit_macro_hotkey(self, macro_name):
-        """Edit the hotkey for an existing macro"""
-        if macro_name not in self.macros:
-            return
-        
-        # Create hotkey editing dialog
-        dialog = HotkeyEditDialog(self, macro_name, self.macros[macro_name])
-        if dialog.exec() == QtWidgets.QDialog.DialogCode.Accepted:
-            new_hotkey = dialog.get_hotkey()
-            
-            # Remove old hotkey
-            if 'hotkey' in self.macros[macro_name]:
-                self.unregister_macro_hotkey(macro_name)
-            
-            # Add new hotkey if provided
-            if new_hotkey:
-                if not self.is_hotkey_conflict(new_hotkey, macro_name):
-                    self.macros[macro_name]['hotkey'] = new_hotkey
-                    self.register_macro_hotkey(macro_name, new_hotkey)
-                    self.save_macros()
-                    self.refresh_commands()
-                    self.status_label.setText(f"Updated hotkey for '{macro_name}': {new_hotkey}")
-                    self.log(f"Updated hotkey for macro '{macro_name}' to '{new_hotkey}'")
+            # Toggle selection
+            if command in self.selected_commands:
+                self.selected_commands.remove(command)
+                # Remove visual feedback
+                item.setForeground(QtGui.QBrush(QtCore.Qt.GlobalColor.white))
             else:
-                # Remove hotkey
-                if 'hotkey' in self.macros[macro_name]:
-                    del self.macros[macro_name]['hotkey']
-                    self.save_macros()
-                    self.refresh_commands()
-                    self.status_label.setText(f"Removed hotkey for '{macro_name}'")
-                    self.log(f"Removed hotkey for macro '{macro_name}'")
+                self.selected_commands.append(command)
+                # Add visual feedback (golden yellow)
+                item.setForeground(QtGui.QBrush(QtGui.QColor(255, 215, 0)))
+            
+            self.status_label.setText(f"Macro Mode: {len(self.selected_commands)} commands selected")
+    
+    def show_context_menu(self, position):
+        """Show right-click context menu"""
+        item = self.results_list.itemAt(position)
+        if not item:
+            return
+            
+        menu = QtWidgets.QMenu(self)
+        command = item.text()
+        
+        if command.startswith("[MACRO]"):
+            # Context menu for existing macros
+            macro_display = command[7:].strip()  # Remove "[MACRO] " prefix
+            
+            # Extract actual macro name (remove hotkey suffix if present)
+            if '(' in macro_display and macro_display.endswith(')'):
+                macro_name = macro_display.rsplit(' (', 1)[0].strip()
+            else:
+                macro_name = macro_display
+            
+            execute_action = menu.addAction("Execute Macro")
+            execute_action.triggered.connect(lambda: self.execute_macro(macro_name))
+            
+            # Hotkey management
+            macro_data = self.macros.get(macro_name, {})
+            if 'hotkey' in macro_data:
+                remove_hotkey_action = menu.addAction(f"Remove Hotkey ({macro_data['hotkey']})")
+                remove_hotkey_action.triggered.connect(lambda: self.remove_macro_hotkey(macro_name))
+            else:
+                add_hotkey_action = menu.addAction("Add Hotkey")
+                add_hotkey_action.triggered.connect(lambda: self.add_macro_hotkey(macro_name))
+            
+            menu.addSeparator()
+            delete_action = menu.addAction("Delete Macro")
+            delete_action.triggered.connect(lambda: self.delete_macro(macro_name))
+        
+        else:
+            # Context menu for regular commands
+            if not self.macro_creation_mode:
+                create_action = menu.addAction("Create Macro from this Command")
+                create_action.triggered.connect(lambda: self.create_single_command_macro(command))
+        
+        menu.exec(self.results_list.mapToGlobal(position))
+    
+    def create_single_command_macro(self, command):
+        """Create a macro from a single command using advanced dialog"""
+        dialog = MacroCreationDialog(self, [command])
+        if dialog.exec() == QtWidgets.QDialog.DialogCode.Accepted:
+            name = dialog.get_macro_name()
+            hotkey = dialog.get_hotkey()
+            if name:
+                # Check hotkey conflicts
+                if hotkey and self.is_hotkey_conflict(hotkey, name):
+                    return
+                
+                # Save macro
+                macro_data = {'commands': [command]}
+                if hotkey:
+                    macro_data['hotkey'] = hotkey
+                
+                self.macros[name] = macro_data
+                self.save_macros()
+                
+                # Register hotkey if provided
+                if hotkey:
+                    self.register_macro_hotkey(name, hotkey)
+                
+                hotkey_text = f" with hotkey {hotkey}" if hotkey else ""
+                self.status_label.setText(f"Created macro '{name}'{hotkey_text} with 1 command")
+                self.refresh_commands()
     
     def execute_macro(self, name):
         """Execute a macro by running all its commands in sequence"""
         if name not in self.macros:
-            self.log(f"ERROR: Macro '{name}' not found")
+            substance_painter.logging.error(f"Macro '{name}' not found")
             return False
         
         macro = self.macros[name]
         commands = macro['commands']
-        self.log(f"Executing macro '{name}' with {len(commands)} commands")
+        substance_painter.logging.info(f"Executing macro '{name}' with {len(commands)} commands")
         
         success_count = 0
         failed_commands = []
         
         for i, command in enumerate(commands):
             try:
-                self.log(f"  [{i+1}/{len(commands)}] {command}")
-                success = self.execute_command(command)
+                substance_painter.logging.info(f"  [{i+1}/{len(commands)}] {command}")
+                
+                # Find and execute the command
+                if command.startswith("[PROC]"):
+                    # Handle procedural command
+                    success = self.execute_procedural_from_command(command)
+                else:
+                    # Handle regular command
+                    success = self.execute_single_command(command)
                 
                 if success:
                     success_count += 1
-                    self.log(f"    ✓ Success")
                 else:
                     failed_commands.append(command)
-                    self.log(f"    ✗ Failed")
-                    # Continue with remaining commands (as per user requirement)
                     
             except Exception as e:
                 failed_commands.append(command)
-                self.log(f"    ✗ Error: {e}")
-                # Continue with remaining commands
+                substance_painter.logging.error(f"    Error: {e}")
         
         # Report results
         if failed_commands:
             self.status_label.setText(f"Macro '{name}': {success_count}/{len(commands)} succeeded")
-            self.log(f"Macro '{name}' completed: {success_count}/{len(commands)} succeeded, {len(failed_commands)} failed")
         else:
             self.status_label.setText(f"Macro '{name}': All {len(commands)} commands succeeded")
-            self.log(f"Macro '{name}' completed successfully: All {len(commands)} commands succeeded")
         
         return len(failed_commands) == 0
     
-    def execute_procedural_from_command(self, command):
-        """Execute a procedural command from a macro by finding the matching procedural resource"""
+    def execute_single_command(self, command):
+        """Execute a single command (used by macro execution)"""
         try:
-            # Extract procedural name from command like "[PROC] Grunge Brushed"
-            if not command.startswith("[PROC]"):
-                return False
-                
-            procedural_name = command[7:].strip()  # Remove "[PROC] " prefix
-            self.log(f"Looking for procedural: '{procedural_name}'")
+            # Create a temporary list item to use existing execute logic
+            temp_item = QtWidgets.QListWidgetItem(command)
             
-            # Get current procedural resources and find the matching one
-            procedurals = self.get_procedural_resources()
-            for procedural in procedurals:
-                if procedural['name'] == procedural_name:
-                    self.log(f"Found matching procedural: {procedural['name']}")
-                    return self.apply_procedural(procedural)
-            
-            self.log(f"ERROR: Procedural '{procedural_name}' not found in current resources")
-            return False
-            
-        except Exception as e:
-            self.log(f"Error executing procedural from command: {e}")
-            return False
-    
-    def apply_procedural(self, procedural_data):
-        """Apply a procedural resource as a new fill effect with proper channel assignment"""
-        try:
-            # Check if project is open
-            if not substance_painter.project.is_open():
-                self.log("ERROR: No project open")
-                self.status_label.setText("No project open")
-                return False
-            
-            selected = self.get_selected_nodes()
-            if not selected:
-                self.log("No layer selected")
-                return False
-            
-            layer = selected[0]
-            insert_pos = self.get_smart_insert_position(layer)
-            
-            # Create a new fill effect
-            effect = substance_painter.layerstack.insert_fill(insert_pos)
-            effect.set_name(f"{procedural_data['name']}")
-            
-            # Get the resource ID
-            resource_id = procedural_data.get('resource_id')
-            if not resource_id:
-                self.log("ERROR: No resource ID available")
-                return False
-            
-            # Apply procedural to Roughness channel (most common use case)
-            try:
-                effect.set_source(ChannelType.Roughness, resource_id)
-                channel = "Roughness"
-                success = True
-            except Exception:
-                # Fallback to BaseColor if Roughness fails
-                try:
-                    effect.set_source(ChannelType.BaseColor, resource_id)
-                    channel = "BaseColor"
-                    success = True
-                except Exception:
-                    # Last resort: try without channel (for mask context)
-                    try:
-                        effect.set_source(None, resource_id)
-                        channel = "grayscale"
-                        success = True
-                    except Exception as e:
-                        self.log(f"Failed to apply procedural: {e}")
-                        success = False
-            
-            stack_type = "mask" if insert_pos.node_stack == NodeStack.Mask else "content"
-            
-            if success:
-                self.log(f"✓ Applied procedural '{procedural_data['name']}' to {channel} channel in {stack_type}")
-                return True
-            else:
-                self.log(f"✗ Failed to apply procedural '{procedural_data['name']}'")
-                return False
-            
-        except Exception as e:
-            self.log(f"Error applying procedural: {e}")
-            import traceback
-            self.log(f"DEBUG: Full traceback: {traceback.format_exc()}")
-            return False
-    
-    def setup_keyboard_shortcuts(self):
-        """Setup keyboard shortcuts for Commander"""
-        # Skip space bar - use simpler approach
-        # Just rely on toolbar button and menu for now
-        pass
-    
-    def keyPressEvent(self, event):
-        """Handle key press events"""
-        if event.key() == QtCore.Qt.Key.Key_Escape:
-            # Hide the dock widget for true popup behavior
-            if hasattr(self, 'dock_widget') and self.dock_widget:
-                self.dock_widget.hide()
-            else:
-                self.hide()
-        elif event.key() == QtCore.Qt.Key.Key_Return or event.key() == QtCore.Qt.Key.Key_Enter:
-            # Enter key executes selected command
-            current_item = self.results_list.currentItem()
-            if current_item:
-                self.on_double_click_execute(current_item)
-                # Hide after execution for popup behavior
-                if hasattr(self, 'dock_widget') and self.dock_widget:
-                    self.dock_widget.hide()
-        else:
-            super().keyPressEvent(event)
-    
-    def toggle_visibility(self):
-        """Toggle Commander visibility"""
-        if self.isVisible():
-            self.hide()
-        else:
-            self.show_and_focus()
-    
-    def show_and_focus(self):
-        """Show Commander and focus search input"""
-        self.show()
-        self.raise_()
-        self.activateWindow()
-        self.search_input.setFocus()
-        self.search_input.selectAll()
-        
-        # Log initialization
-        self.log("Commander Plugin loaded successfully")
-    
-    def show_commander_from_shortcut(self):
-        """Show Commander at mouse position with popup behavior"""
-        try:
-            substance_painter.logging.info("Commander shortcut triggered - showing Commander at mouse")
-            
-            # Work with the dock widget directly
-            if hasattr(self, 'dock_widget') and self.dock_widget:
-                dock = self.dock_widget
-                
-                # Position at mouse cursor
-                cursor_pos = QtGui.QCursor.pos()
-                
-                # Adjust position to keep widget on screen
-                screen_rect = QtWidgets.QApplication.primaryScreen().geometry()
-                widget_size = dock.sizeHint()
-                
-                # Calculate position (offset slightly to avoid cursor)
-                x = cursor_pos.x() + 10
-                y = cursor_pos.y() + 10
-                
-                # Keep on screen
-                if x + widget_size.width() > screen_rect.right():
-                    x = cursor_pos.x() - widget_size.width() - 10
-                if y + widget_size.height() > screen_rect.bottom():
-                    y = cursor_pos.y() - widget_size.height() - 10
-                
-                dock.move(x, y)
-                
-                # Show the dock widget
-                dock.show()
-                dock.setVisible(True)
-                dock.raise_()
-                dock.activateWindow()
-                
-                # Also show the widget inside
-                self.show()
-                self.raise_()
-                
-                # Focus search input and clear any existing search
-                self.search_input.setFocus()
-                self.search_input.clear()
-                
-                substance_painter.logging.info(f"Commander shown at mouse position ({x}, {y})")
-            else:
-                substance_painter.logging.info("No dock widget reference - showing widget directly")
-                self.show()
-                self.raise_()
-                self.activateWindow()
-                self.search_input.setFocus()
-                self.search_input.clear()
-            
-        except Exception as e:
-            substance_painter.logging.error(f"Error showing Commander from shortcut: {e}")
-            import traceback
-            substance_painter.logging.error(f"Traceback: {traceback.format_exc()}")
-    
-    def eventFilter(self, obj, event):
-        """Handle events to close Commander on outside clicks"""
-        try:
-            # Only process events when Commander is visible
-            if hasattr(self, 'dock_widget') and self.dock_widget and self.dock_widget.isVisible():
-                
-                # Check for mouse press events outside the Commander
-                if event.type() == QtCore.QEvent.Type.MouseButtonPress:
-                    if event.button() == QtCore.Qt.MouseButton.LeftButton:
-                        # Get the widget under the mouse
-                        try:
-                            global_pos = event.globalPosition().toPoint()
-                            widget_under_mouse = QtWidgets.QApplication.widgetAt(global_pos)
-                            
-                            # Check if the click is outside our dock widget and its children
-                            if widget_under_mouse is not None:
-                                # Check if clicked widget is part of our Commander
-                                commander_widgets = [self, self.dock_widget, self.search_input, self.results_list]
-                                is_inside_commander = False
-                                
-                                for commander_widget in commander_widgets:
-                                    if widget_under_mouse == commander_widget or commander_widget.isAncestorOf(widget_under_mouse):
-                                        is_inside_commander = True
-                                        break
-                                
-                                # If click is outside Commander, hide it
-                                if not is_inside_commander:
-                                    substance_painter.logging.info("Outside click detected - hiding Commander")
-                                    self.dock_widget.hide()
-                                    
-                        except Exception as click_error:
-                            # Don't interfere with SP if there's any error in click detection
-                            pass
-                
-                # Also handle focus loss (when clicking somewhere else)
-                elif event.type() == QtCore.QEvent.Type.WindowDeactivate:
-                    if obj == self.dock_widget:
-                        # Small delay to avoid immediate hiding when clicking on SP UI
-                        QtCore.QTimer.singleShot(150, self._delayed_hide_check)
-                        
-        except Exception as e:
-            # Don't log event filter errors to avoid spam
-            pass
-            
-        # Always let the event pass through to avoid interfering with SP
-        return super().eventFilter(obj, event)
-    
-    def _delayed_hide_check(self):
-        """Check if Commander should be hidden after a delay"""
-        try:
-            if hasattr(self, 'dock_widget') and self.dock_widget and self.dock_widget.isVisible():
-                # Only hide if nothing in Commander has focus
-                if not (self.dock_widget.hasFocus() or self.search_input.hasFocus() or self.results_list.hasFocus()):
-                    substance_painter.logging.info("Focus lost - hiding Commander")
-                    self.dock_widget.hide()
-        except Exception as e:
-            pass
-    
-    def log(self, message):
-        """Simple logging method"""
-        try:
-            print(f"Commander Plugin: {message}")
-            
-            # SP logging
-            try:
-                substance_painter.logging.info(f"Commander Plugin: {message}")
-            except:
-                pass
-        except:
-            pass
-    
-    def refresh_commands(self):
-        """Refresh the command list with macros first, then comprehensive layerstack commands"""
-        try:
-            self.results_list.clear()
-            
-            # Add macros first (at top, in orange color)
-            for macro_name in sorted(self.macros.keys()):
-                # Check if macro has hotkey
-                macro_data = self.macros[macro_name]
-                hotkey_text = f" ({macro_data['hotkey']})" if 'hotkey' in macro_data else ""
-                
-                item = QtWidgets.QListWidgetItem(f"[MACRO] {macro_name}{hotkey_text}")
-                item.setForeground(QtGui.QBrush(QtGui.QColor(255, 140, 0)))  # Dark orange - very readable
-                
-                # Enhanced tooltip with hotkey info
-                tooltip = f"Macro: {len(macro_data['commands'])} commands"
-                if 'hotkey' in macro_data:
-                    tooltip += f"\nHotkey: {macro_data['hotkey']}"
-                tooltip += "\n" + "\n".join([f"• {cmd}" for cmd in macro_data['commands']])
-                
-                item.setToolTip(tooltip)
-                self.results_list.addItem(item)
-            
-            # Real layerstack commands based on actual API
-            # Real API commands from /API/layerstack.py - all verified as working
-            commands = [
-                # === Layer Creation (Real API: insert_*) ===
-                "Create Paint Layer",           # → insert_paint()
-                "Create Fill Layer",            # → insert_fill()
-                "Create Group Layer",           # → insert_group()
-                "Create Layer Instance",        # → instantiate()
-                
-                # === Effect Creation (Real API: insert_*_effect) ===
-                "Insert Levels Effect",         # → insert_levels_effect()
-                "Insert Filter Effect",         # → insert_filter_effect()
-                "Insert Fill Effect",           # → insert_fill() (creates FillEffectNode when in effect stack)
-                "Insert Paint Effect",          # → insert_paint() (creates PaintEffectNode when in effect stack)
-                "Insert Generator Effect",      # → insert_generator_effect()
-                "Insert Compare Mask Effect",   # → insert_compare_mask_effect()
-                "Insert Color Selection Effect", # → insert_color_selection_effect()
-                "Insert Anchor Point Effect",   # → insert_anchor_point_effect()
-                
-                # === Layer Management (Real API) ===
-                "Delete Selected Layers",      # → delete_node()
-                "Rename Selected Layer",       # → node.set_name()
-                
-                # === Layer Properties (Real API: Node methods) ===
-                "Toggle Layer Visibility",     # → node.set_visible()
-                "Show Layer",                  # → node.set_visible(True)
-                "Hide Layer",                  # → node.set_visible(False)
-                "Set Layer Opacity",          # → node.set_opacity()
-                "Get Layer Opacity",          # → node.get_opacity()
-                "Set Blend Mode",              # → node.set_blending_mode()
-                "Get Blend Mode",              # → node.get_blending_mode()
-                
-                # === Layer Masks (Real API: LayerNode methods) ===
-                "Add Layer Mask",             # → layer.add_mask()
-                "Remove Layer Mask",          # → layer.remove_mask()
-                "Enable Layer Mask",          # → layer.enable_mask(True)
-                "Disable Layer Mask",         # → layer.enable_mask(False)
-                "Set Mask Background White",  # → layer.set_mask_background(MaskBackground.White)
-                "Set Mask Background Black",  # → layer.set_mask_background(MaskBackground.Black)
-                
-                # === Smart Materials/Masks (Real API) ===
-                "Insert Smart Material",      # → insert_smart_material()
-                "Create Smart Material",      # → create_smart_material()
-                "Insert Smart Mask",          # → insert_smart_mask()
-                "Create Smart Mask",          # → create_smart_mask()
-                
-                # === Geometry Masks (Real API: LayerNode methods) ===
-                "Set Geometry Mask Mesh",     # → layer.set_geometry_mask_type(GeometryMaskType.Mesh)
-                "Set Geometry Mask UV Tile",  # → layer.set_geometry_mask_type(GeometryMaskType.UVTile)
-                "Enable Geometry Mask",       # → layer.set_geometry_mask_enabled_meshes()
-                
-                # === Projection Modes (Real API: FillParamsEditorMixin) ===
-                "Set Projection UV",          # → layer.set_projection_mode(ProjectionMode.UV)
-                "Set Projection Triplanar",   # → layer.set_projection_mode(ProjectionMode.Triplanar)
-                "Set Projection Planar",      # → layer.set_projection_mode(ProjectionMode.Planar)
-                "Set Projection Spherical",   # → layer.set_projection_mode(ProjectionMode.Spherical)
-                "Set Projection Cylindrical", # → layer.set_projection_mode(ProjectionMode.Cylindrical)
-                "Enable Symmetry",            # → layer.set_symmetry_enabled(True)
-                "Disable Symmetry"            # → layer.set_symmetry_enabled(False)
-            ]
-            
-            for cmd in commands:
-                item = QtWidgets.QListWidgetItem(cmd)
-                # Add category prefix for better organization
-                if any(x in cmd.lower() for x in ['create', 'add']):
-                    item.setToolTip("Creation Commands")
-                elif any(x in cmd.lower() for x in ['duplicate', 'delete', 'copy', 'paste', 'clear', 'merge']):
-                    item.setToolTip("Management Commands")
-                elif any(x in cmd.lower() for x in ['move', 'group', 'reorder']):
-                    item.setToolTip("Organization Commands")
-                elif any(x in cmd.lower() for x in ['visibility', 'opacity', 'lock']):
-                    item.setToolTip("Property Commands")
-                elif any(x in cmd.lower() for x in ['blend', 'mode']):
-                    item.setToolTip("Blending Commands")
-                elif any(x in cmd.lower() for x in ['mask']):
-                    item.setToolTip("Mask Commands")
-                elif any(x in cmd.lower() for x in ['select']):
-                    item.setToolTip("Selection Commands")
-                elif any(x in cmd.lower() for x in ['channel', 'base', 'roughness', 'metallic', 'normal']):
-                    item.setToolTip("Channel Commands")
-                elif any(x in cmd.lower() for x in ['stack', 'flatten', 'reset']):
-                    item.setToolTip("Stack Commands")
-                else:
-                    item.setToolTip("Advanced Commands")
-                
-                self.results_list.addItem(item)
-            
-            # Add procedural resources below layerstack commands
-            procedural_count = 0
-            try:
-                procedurals = self.get_procedural_resources()
-                for procedural in procedurals:
-                    item = QtWidgets.QListWidgetItem(f"[PROC] {procedural['name']}")
-                    item.setForeground(QtGui.QBrush(QtGui.QColor(100, 149, 237)))  # Cornflower blue - distinct from macros
-                    item.setToolTip(f"Procedural: {procedural.get('category', 'Unknown')}\nApplies to Roughness channel (with BaseColor fallback)")
-                    # Store the resource identifier for later use
-                    item.setData(QtCore.Qt.UserRole, procedural)
-                    self.results_list.addItem(item)
-                    procedural_count += 1
-            except Exception as e:
-                self.log(f"Error loading procedural resources: {e}")
-            
-            total_items = len(commands) + procedural_count + len(self.macros)
-            self.status_label.setText(f"Found {total_items} items ({len(commands)} commands, {procedural_count} procedurals)")
-            self.log(f"Refreshed {len(commands)} layerstack commands and {procedural_count} procedural resources")
-            
-        except Exception as e:
-            self.log(f"Error refreshing commands: {e}")
-            self.status_label.setText("Error refreshing commands")
-    
-    def on_search_changed(self, search_text):
-        """Handle search text changes"""
-        try:
-            search_lower = search_text.lower()
-            
-            for i in range(self.results_list.count()):
-                item = self.results_list.item(i)
-                if search_text == "" or search_lower in item.text().lower():
-                    item.setHidden(False)
-                else:
-                    item.setHidden(True)
-                    
-        except Exception as e:
-            self.log(f"Error in search: {e}")
-    
-    def on_double_click_execute(self, item):
-        """Handle double-click to execute command or macro"""
-        try:
-            command = item.text()
-            self.log(f"Double-clicked: {command}")
-            
-            # Check if it's a macro
-            if command.startswith("[MACRO]"):
-                macro_name = command[7:].strip()  # Remove "[MACRO] " prefix
-                self.log(f"Executing macro: {macro_name}")
-                success = self.execute_macro(macro_name)
-            elif command.startswith("[PROC]"):
-                # It's a procedural resource
-                procedural_data = item.data(QtCore.Qt.UserRole)
-                if procedural_data:
-                    self.log(f"Applying procedural: {procedural_data['name']}")
-                    success = self.apply_procedural(procedural_data)
-                else:
-                    self.log("ERROR: No procedural data found")
-                    success = False
-            else:
-                # Check if project is open for regular commands
-                if not substance_painter.project.is_open():
-                    self.log("ERROR: No project open")
-                    self.status_label.setText("No project open")
-                    return
-                
-                # Execute regular command
-                success = self.execute_command(command)
-            
-            if success:
-                self.status_label.setText(f"✓ Executed: {command}")
-                self.log(f"✓ Successfully executed: {command}")
-                # Hide after successful execution for popup behavior
-                if hasattr(self, 'dock_widget') and self.dock_widget:
-                    self.dock_widget.hide()
-            else:
-                self.status_label.setText(f"✗ Failed: {command}")
-                self.log(f"✗ Failed to execute: {command}")
-                
-        except Exception as e:
-            self.log(f"Error in double-click execute: {e}")
-            self.status_label.setText(f"Double-click error: {e}")
-    
-    def execute_selected(self):
-        """Execute the selected command"""
-        try:
-            selected_items = self.results_list.selectedItems()
-            if not selected_items:
-                self.log("No command selected")
-                return
-            
-            command = selected_items[0].text()
-            self.log(f"Executing: {command}")
-            
-            # Check if project is open
-            if not substance_painter.project.is_open():
-                self.log("ERROR: No project open")
-                self.status_label.setText("No project open")
-                return
-            
-            # Execute the command
-            success = self.execute_command(command)
-            
-            if success:
-                self.status_label.setText(f"Executed: {command}")
-                self.log(f"✓ Successfully executed: {command}")
-            else:
-                self.status_label.setText(f"Failed to execute: {command}")
-                self.log(f"✗ Failed to execute: {command}")
-                
-        except Exception as e:
-            self.log(f"Error executing command: {e}")
-            self.status_label.setText(f"Execution error: {e}")
-    
-    def execute_command(self, command):
-        """Execute a specific command using the real Substance Painter API"""
-        try:
-            # Handle procedural resources
+            # For procedural commands, we need to set the user data
             if command.startswith("[PROC]"):
-                return self.execute_procedural_from_command(command)
-                
-            # Handle regular layerstack commands
-            # === Layer Creation Commands (Real API) ===
-            if command == "Create Paint Layer":
-                return self.create_paint_layer()
-            elif command == "Create Fill Layer":
-                return self.create_fill_layer()
-            elif command == "Create Group Layer":
-                return self.create_group_layer()
-            elif command == "Create Layer Instance":
-                return self.create_layer_instance()
-                
-            # === Effect Creation Commands (Real API) ===
-            elif command == "Insert Levels Effect":
-                return self.insert_levels_effect()
-            elif command == "Insert Filter Effect":
-                return self.insert_filter_effect()
-            elif command == "Insert Fill Effect":
-                return self.insert_fill_effect()
-            elif command == "Insert Paint Effect":
-                return self.insert_paint_effect()
-            elif command == "Insert Generator Effect":
-                return self.insert_generator_effect()
-            elif command == "Insert Compare Mask Effect":
-                return self.insert_compare_mask_effect()
-            elif command == "Insert Color Selection Effect":
-                return self.insert_color_selection_effect()
-            elif command == "Insert Anchor Point Effect":
-                return self.insert_anchor_point_effect()
-                
-            # === Layer Management Commands (Real API) ===
-            elif command == "Delete Selected Layers":
-                return self.delete_selected_layers()
-            elif command == "Rename Selected Layer":
-                return self.rename_selected_layer()
-                
-            # === Layer Properties Commands (Real API) ===
-            elif command == "Toggle Layer Visibility":
-                return self.toggle_layer_visibility()
-            elif command == "Show Layer":
-                return self.show_layer()
-            elif command == "Hide Layer":
-                return self.hide_layer()
-            elif command == "Set Layer Opacity":
-                return self.set_layer_opacity()
-            elif command == "Get Layer Opacity":
-                return self.get_layer_opacity()
-            elif command == "Set Blend Mode":
-                return self.set_blend_mode()
-            elif command == "Get Blend Mode":
-                return self.get_blend_mode()
-                
-            # === Layer Mask Commands (Real API) ===
-            elif command == "Add Layer Mask":
-                return self.add_layer_mask()
-            elif command == "Remove Layer Mask":
-                return self.remove_layer_mask()
-            elif command == "Enable Layer Mask":
-                return self.enable_layer_mask()
-            elif command == "Disable Layer Mask":
-                return self.disable_layer_mask()
-            elif command == "Set Mask Background White":
-                return self.set_mask_background_white()
-            elif command == "Set Mask Background Black":
-                return self.set_mask_background_black()
-                
-            # === Smart Materials/Masks Commands (Real API) ===
-            elif command == "Insert Smart Material":
-                return self.insert_smart_material()
-            elif command == "Create Smart Material":
-                return self.create_smart_material()
-            elif command == "Insert Smart Mask":
-                return self.insert_smart_mask()
-            elif command == "Create Smart Mask":
-                return self.create_smart_mask()
-                
-            # === Geometry Mask Commands (Real API) ===
-            elif command == "Set Geometry Mask Mesh":
-                return self.set_geometry_mask_mesh()
-            elif command == "Set Geometry Mask UV Tile":
-                return self.set_geometry_mask_uv_tile()
-            elif command == "Enable Geometry Mask":
-                return self.enable_geometry_mask()
-                
-            # === Projection Mode Commands (Real API) ===
-            elif command == "Set Projection UV":
-                return self.set_projection_uv()
-            elif command == "Set Projection Triplanar":
-                return self.set_projection_triplanar()
-            elif command == "Set Projection Planar":
-                return self.set_projection_planar()
-            elif command == "Set Projection Spherical":
-                return self.set_projection_spherical()
-            elif command == "Set Projection Cylindrical":
-                return self.set_projection_cylindrical()
-            elif command == "Enable Symmetry":
-                return self.enable_symmetry()
-            elif command == "Disable Symmetry":
-                return self.disable_symmetry()
-                
-            else:
-                self.log(f"Unknown command: {command}")
-                return False
-                
+                proc_name = command[7:].strip()
+                # Find the procedural in our list
+                for proc in self.get_procedural_resources():
+                    if proc['name'] == proc_name:
+                        temp_item.setData(QtCore.Qt.UserRole, proc)
+                        break
+            
+            self.on_item_double_clicked(temp_item)
+            return True
         except Exception as e:
-            self.log(f"Error executing command '{command}': {e}")
+            substance_painter.logging.error(f"Failed to execute command '{command}': {e}")
             return False
     
+    def execute_procedural_from_command(self, command):
+        """Execute a procedural command from a macro"""
+        try:
+            proc_name = command[7:].strip()  # Remove "[PROC] " prefix
+            # Find the matching procedural resource
+            for proc in self.get_procedural_resources():
+                if proc['name'] == proc_name:
+                    result = self.apply_procedural(proc)
+                    return True
+            return False
+        except Exception as e:
+            substance_painter.logging.error(f"Failed to execute procedural '{command}': {e}")
+            return False
+    
+    def delete_macro(self, name):
+        """Delete a macro"""
+        reply = QtWidgets.QMessageBox.question(
+            self, "Delete Macro", 
+            f"Are you sure you want to delete macro '{name}'?",
+            QtWidgets.QMessageBox.StandardButton.Yes | QtWidgets.QMessageBox.StandardButton.No
+        )
+        
+        if reply == QtWidgets.QMessageBox.StandardButton.Yes:
+            if name in self.macros:
+                # Unregister hotkey if it exists
+                self.unregister_macro_hotkey(name)
+                del self.macros[name]
+                self.save_macros()
+                self.status_label.setText(f"Deleted macro '{name}'")
+                self.refresh_commands()
+    
+    def add_macro_hotkey(self, macro_name):
+        """Add a hotkey to an existing macro"""
+        # Simple hotkey input dialog
+        hotkey, ok = QtWidgets.QInputDialog.getText(
+            self, "Add Hotkey", 
+            f"Enter hotkey for macro '{macro_name}':\n" +
+            "(Examples: F5, Ctrl+Shift+W, Alt+Q)"
+        )
+        
+        if ok and hotkey.strip():
+            hotkey = hotkey.strip()
+            if self.is_hotkey_conflict(hotkey, macro_name):
+                return
+            
+            # Add hotkey to macro
+            self.macros[macro_name]['hotkey'] = hotkey
+            self.save_macros()
+            self.register_macro_hotkey(macro_name, hotkey)
+            
+            self.status_label.setText(f"Added hotkey '{hotkey}' to macro '{macro_name}'")
+            self.refresh_commands()
+    
+    def remove_macro_hotkey(self, macro_name):
+        """Remove a hotkey from a macro"""
+        reply = QtWidgets.QMessageBox.question(
+            self, "Remove Hotkey", 
+            f"Remove hotkey from macro '{macro_name}'?",
+            QtWidgets.QMessageBox.StandardButton.Yes | QtWidgets.QMessageBox.StandardButton.No
+        )
+        
+        if reply == QtWidgets.QMessageBox.StandardButton.Yes:
+            if macro_name in self.macros and 'hotkey' in self.macros[macro_name]:
+                self.unregister_macro_hotkey(macro_name)
+                del self.macros[macro_name]['hotkey']
+                self.save_macros()
+                self.refresh_commands()
+                self.status_label.setText(f"Removed hotkey for '{macro_name}'")
+    
+    # ---- End Macro System ----
+    
+    def create_paint_layer(self):
+        """Create a paint layer using official API"""
+        stack = substance_painter.textureset.get_active_stack()
+        insert_position = InsertPosition.from_textureset_stack(stack)
+        layer = substance_painter.layerstack.insert_paint(insert_position)
+        layer.set_name("Paint Layer")
+    
+    def create_fill_layer(self):
+        """Create a fill layer using official API"""
+        stack = substance_painter.textureset.get_active_stack()
+        insert_position = InsertPosition.from_textureset_stack(stack)
+        layer = substance_painter.layerstack.insert_fill(insert_position)
+        layer.set_name("Fill Layer")
+    
+    def create_group_layer(self):
+        """Create a group layer using official API"""
+        stack = substance_painter.textureset.get_active_stack()
+        insert_position = InsertPosition.from_textureset_stack(stack)
+        layer = substance_painter.layerstack.insert_group(insert_position)
+        layer.set_name("Group")
+    
+    def create_instance_layer(self):
+        """Create instance layer from selected layer using official API"""
+        stack = substance_painter.textureset.get_active_stack()
+        selected_nodes = get_selected_nodes(stack)
+        
+        if selected_nodes:
+            source_layer = selected_nodes[0]
+            insert_position = InsertPosition.from_textureset_stack(stack)
+            instance = instantiate(insert_position, source_layer)
+            instance.set_name(f"Instance of {source_layer.get_name()}")
+        else:
+            raise ValueError("No layer selected to instance")
+    
+    def insert_smart_material(self):
+        """Insert smart material - requires resource selection (simplified for now)"""
+        stack = substance_painter.textureset.get_active_stack()
+        insert_position = InsertPosition.from_textureset_stack(stack)
+        # Note: This would require resource selection UI in full implementation
+        raise ValueError("Smart Material insertion requires resource selection (not implemented in minimal version)")
+    
+    # === EFFECT COMMANDS ===
+    def insert_fill_effect(self):
+        """Insert fill effect on selected layer using official API"""
+        stack = substance_painter.textureset.get_active_stack()
+        selected_nodes = get_selected_nodes(stack)
+        
+        if selected_nodes:
+            layer = selected_nodes[0]
+            insert_position = InsertPosition.inside_node(layer, NodeStack.Content)
+            effect = insert_fill(insert_position)
+            effect.set_name("Fill Effect")
+        else:
+            raise ValueError("No layer selected")
+    
+    def insert_paint_effect(self):
+        """Insert paint effect on selected layer using official API"""
+        stack = substance_painter.textureset.get_active_stack()
+        selected_nodes = get_selected_nodes(stack)
+        
+        if selected_nodes:
+            layer = selected_nodes[0]
+            insert_position = InsertPosition.inside_node(layer, NodeStack.Content)
+            effect = insert_paint(insert_position)
+            effect.set_name("Paint Effect")
+        else:
+            raise ValueError("No layer selected")
+    
+    def insert_levels_effect(self):
+        """Insert levels effect using official API"""
+        stack = substance_painter.textureset.get_active_stack()
+        selected_nodes = get_selected_nodes(stack)
+        
+        if selected_nodes:
+            layer = selected_nodes[0]
+            insert_position = InsertPosition.inside_node(layer, NodeStack.Content)
+            effect = insert_levels_effect(insert_position)
+            effect.set_name("Levels")
+        else:
+            raise ValueError("No layer selected")
+    
+    def insert_compare_mask_effect(self):
+        """Insert compare mask effect using official API"""
+        stack = substance_painter.textureset.get_active_stack()
+        selected_nodes = get_selected_nodes(stack)
+        
+        if selected_nodes:
+            layer = selected_nodes[0]
+            if layer.has_mask():
+                insert_position = InsertPosition.inside_node(layer, NodeStack.Mask)
+                effect = insert_compare_mask_effect(insert_position)
+                effect.set_name("Compare Mask")
+            else:
+                raise ValueError("Layer needs a mask for compare mask effect")
+        else:
+            raise ValueError("No layer selected")
+    
+    def insert_filter_effect(self):
+        """Insert filter effect using official API"""
+        stack = substance_painter.textureset.get_active_stack()
+        selected_nodes = get_selected_nodes(stack)
+        
+        if selected_nodes:
+            layer = selected_nodes[0]
+            insert_position = InsertPosition.inside_node(layer, NodeStack.Content)
+            effect = insert_filter_effect(insert_position)
+            effect.set_name("Filter")
+        else:
+            raise ValueError("No layer selected")
+    
+    def insert_generator_effect(self):
+        """Insert generator effect using official API"""
+        stack = substance_painter.textureset.get_active_stack()
+        selected_nodes = get_selected_nodes(stack)
+        
+        if selected_nodes:
+            layer = selected_nodes[0]
+            insert_position = InsertPosition.inside_node(layer, NodeStack.Content)
+            effect = insert_generator_effect(insert_position)
+            effect.set_name("Generator")
+        else:
+            raise ValueError("No layer selected")
+    
+    def insert_anchor_point_effect(self):
+        """Insert anchor point effect using official API"""
+        stack = substance_painter.textureset.get_active_stack()
+        selected_nodes = get_selected_nodes(stack)
+        
+        if selected_nodes:
+            layer = selected_nodes[0]
+            insert_position = InsertPosition.inside_node(layer, NodeStack.Content)
+            effect = insert_anchor_point_effect(insert_position, "Anchor Point")
+            effect.set_name("Anchor Point")
+        else:
+            raise ValueError("No layer selected")
+    
+    def insert_color_selection_effect(self):
+        """Insert color selection effect using official API"""
+        stack = substance_painter.textureset.get_active_stack()
+        selected_nodes = get_selected_nodes(stack)
+        
+        if selected_nodes:
+            layer = selected_nodes[0]
+            if layer.has_mask():
+                insert_position = InsertPosition.inside_node(layer, NodeStack.Mask)
+                effect = insert_color_selection_effect(insert_position)
+                effect.set_name("Color Selection")
+            else:
+                raise ValueError("Layer needs a mask for color selection effect")
+        else:
+            raise ValueError("No layer selected")
+    
+    # === MASK OPERATIONS ===
     def get_selected_nodes(self):
         """Get currently selected layer nodes using real API"""
         try:
@@ -1551,1367 +1300,359 @@ class CommanderWidget(QtWidgets.QWidget):
             
             # Get selected nodes - this is the actual API call
             return substance_painter.layerstack.get_selected_nodes(stack)
-            
-        except Exception as e:
-            self.log(f"Error getting selected nodes: {e}")
+        except Exception:
             return []
     
-    def get_active_stack(self):
-        """Get the active texture set stack"""
-        try:
-            texture_sets = substance_painter.textureset.all_texture_sets()
-            if not texture_sets:
-                return None
-            return texture_sets[0].get_stack()
-        except Exception as e:
-            self.log(f"Error getting active stack: {e}")
-            return None
-    
-    def create_paint_layer(self):
-        """Create a paint layer using real API"""
-        try:
-            stack = self.get_active_stack()
-            if not stack:
-                return False
-            
-            # Create insert position at top of stack - this is the real API
-            insert_pos = InsertPosition.from_textureset_stack(stack)
-            
-            # Insert paint layer - this is the real API function
-            new_layer = substance_painter.layerstack.insert_paint(insert_pos)
-            new_layer.set_name("Paint Layer")
-            
-            # Select the newly created layer so subsequent commands operate on it
-            substance_painter.layerstack.set_selected_nodes([new_layer])
-            
-            self.log("✓ Created paint layer and selected it")
-            
-            return True
-            
-        except Exception as e:
-            self.log(f"Error creating paint layer: {e}")
-            return False
-    
-    def create_fill_layer(self):
-        """Create a fill layer using real API"""
-        try:
-            stack = self.get_active_stack()
-            if not stack:
-                return False
-            
-            # Create insert position at top of stack - this is the real API
-            insert_pos = substance_painter.layerstack.InsertPosition.from_textureset_stack(stack)
-            
-            # Insert fill layer - this is the real API function  
-            new_layer = substance_painter.layerstack.insert_fill(insert_pos)
-            new_layer.set_name("Fill Layer")
-            
-            # Enable only BaseColor channel by default
-            new_layer.active_channels = {ChannelType.BaseColor}
-            
-            # Select the newly created layer so subsequent commands operate on it
-            substance_painter.layerstack.set_selected_nodes([new_layer])
-            
-            self.log("✓ Created fill layer with BaseColor channel only and selected it")
-            
-            return True
-            
-        except Exception as e:
-            self.log(f"Error creating fill layer: {e}")
-            return False
-    
-    def create_group_layer(self):
-        """Create a group layer using real API"""
-        try:
-            stack = self.get_active_stack()
-            if not stack:
-                return False
-            
-            # Create insert position at top of stack - this is the real API
-            insert_pos = substance_painter.layerstack.InsertPosition.from_textureset_stack(stack)
-            
-            # Insert group layer - this is the real API function
-            new_layer = substance_painter.layerstack.insert_group(insert_pos)
-            new_layer.set_name("Group")
-            
-            # Select the newly created layer so subsequent commands operate on it
-            substance_painter.layerstack.set_selected_nodes([new_layer])
-            
-            self.log("✓ Created group layer and selected it")
-            
-            return True
-            
-        except Exception as e:
-            self.log(f"Error creating group layer: {e}")
-            return False
-    
-    # Keep legacy method for compatibility
-    def create_folder(self):
-        """Create a folder (legacy)"""
-        return self.create_group_layer()
-    
-    # === Effect Creation Methods ===
-    def create_levels_effect(self):
-        """Create a levels effect using real API"""
-        try:
-            selected = self.get_selected_nodes()
-            if not selected:
-                self.log("No layer selected to add effect to")
-                return False
-            
-            layer = selected[0]
-            # Insert in content stack
-            insert_pos = substance_painter.layerstack.InsertPosition.inside_node(
-                layer, substance_painter.layerstack.NodeStack.Content)
-            
-            new_effect = substance_painter.layerstack.insert_levels_effect(insert_pos)
-            new_effect.set_name("Levels Effect")
-            
-            return True
-            
-        except Exception as e:
-            self.log(f"Error creating levels effect: {e}")
-            return False
-    
-    def create_filter_effect(self):
-        """Create a filter effect using real API"""
-        try:
-            selected = self.get_selected_nodes()
-            if not selected:
-                self.log("No layer selected to add effect to")
-                return False
-            
-            layer = selected[0]
-            # Insert in content stack
-            insert_pos = substance_painter.layerstack.InsertPosition.inside_node(
-                layer, substance_painter.layerstack.NodeStack.Content)
-            
-            new_effect = substance_painter.layerstack.insert_filter_effect(insert_pos)
-            new_effect.set_name("Filter Effect")
-            
-            return True
-            
-        except Exception as e:
-            self.log(f"Error creating filter effect: {e}")
-            return False
-    
-    def create_generator_effect(self):
-        """Create a generator effect using real API"""
-        try:
-            selected = self.get_selected_nodes()
-            if not selected:
-                self.log("No layer selected to add effect to")
-                return False
-            
-            layer = selected[0]
-            # Insert in content stack
-            insert_pos = substance_painter.layerstack.InsertPosition.inside_node(
-                layer, substance_painter.layerstack.NodeStack.Content)
-            
-            new_effect = substance_painter.layerstack.insert_generator_effect(insert_pos)
-            new_effect.set_name("Generator Effect")
-            
-            return True
-            
-        except Exception as e:
-            self.log(f"Error creating generator effect: {e}")
-            return False
-    
-    def duplicate_selected_layer(self):
-        """Duplicate the selected layer - NOT AVAILABLE in real API"""
-        # The real API doesn't have a direct duplicate function
-        # This would require copying layer properties manually
-        return self.show_not_implemented("Duplicate Layer (API limitation)")
-    
-    def delete_selected_layer(self):
-        """Delete the selected layer using real API"""
-        try:
-            selected = self.get_selected_nodes()
-            if not selected:
-                self.log("No layer selected")
-                return False
-            
-            # Delete each selected node - this is the real API function
-            for node in selected:
-                substance_painter.layerstack.delete_node(node)
-            
-            return True
-            
-        except Exception as e:
-            self.log(f"Error deleting layer: {e}")
-            return False
-    
-    def toggle_layer_visibility(self):
-        """Toggle visibility of selected layer using real API"""
-        try:
-            selected = self.get_selected_nodes()
-            if not selected:
-                self.log("No layer selected")
-                return False
-            
-            # Toggle visibility for each selected node - this uses the real API
-            for node in selected:
-                current_visible = node.is_visible()
-                node.set_visible(not current_visible)
-                
-            return True
-            
-        except Exception as e:
-            self.log(f"Error toggling visibility: {e}")
-            return False
-    
-    def move_layer_up(self):
-        """Move selected layer up - NOT AVAILABLE in real API"""
-        # The real API doesn't have move_layers_up/down functions
-        # Would need to be implemented using InsertPosition and re-insertion
-        return self.show_not_implemented("Move Layer Up (API limitation)")
-    
-    def move_layer_down(self):
-        """Move selected layer down - NOT AVAILABLE in real API"""
-        # The real API doesn't have move_layers_up/down functions  
-        # Would need to be implemented using InsertPosition and re-insertion
-        return self.show_not_implemented("Move Layer Down (API limitation)")
-    
-    # =====================================================
-    # ADDITIONAL LAYERSTACK COMMAND IMPLEMENTATIONS  
-    # =====================================================
-    
-    # Layer Creation Commands
-    def create_adjustment_layer(self):
-        """Create an adjustment layer"""
-        try:
-            # Adjustment layers might be implemented as a specific type of fill layer
-            return self.create_fill_layer()
-        except Exception as e:
-            self.log(f"Error creating adjustment layer: {e}")
-            return False
-    
-    def create_anchor_point(self):
-        """Create an anchor point"""
-        return self.show_not_implemented("Create Anchor Point")
-    
-    # Layer Management Commands  
-    def copy_layers(self):
-        """Copy selected layers"""
-        try:
-            selected = self.get_selected_nodes()
-            if not selected:
-                self.log("No layers selected")
-                return False
-            
-            # Store reference for paste operation (simplified)
-            self._copied_layers = selected
-            self.log(f"Copied {len(selected)} layers")
-            return True
-            
-        except Exception as e:
-            self.log(f"Error copying layers: {e}")
-            return False
-    
-    def paste_layers(self):
-        """Paste copied layers"""
-        try:
-            if not hasattr(self, '_copied_layers') or not self._copied_layers:
-                self.log("No layers to paste")
-                return False
-                
-            # Duplicate the copied layers
-            substance_painter.layerstack.duplicate_layers(self._copied_layers)
-            self.log(f"Pasted {len(self._copied_layers)} layers")
-            return True
-            
-        except Exception as e:
-            self.log(f"Error pasting layers: {e}")
-            return False
-    
-    def clear_layer(self):
-        """Clear the selected layer"""
-        try:
-            selected = self.get_selected_nodes()
-            if not selected:
-                self.log("No layer selected")
-                return False
-            
-            # Clear layer content (placeholder implementation)
-            self.log("Layer cleared (placeholder implementation)")
-            return True
-            
-        except Exception as e:
-            self.log(f"Error clearing layer: {e}")
-            return False
-    
-    def flatten_visible_layers(self):
-        """Flatten all visible layers"""
-        return self.show_not_implemented("Flatten Visible Layers")
-    
-    def merge_down(self):
-        """Merge layer down"""
-        try:
-            selected = self.get_selected_nodes()
-            if not selected:
-                self.log("No layer selected")
-                return False
-            
-            # Merge with layer below
-            substance_painter.layerstack.merge_layers(selected)
-            return True
-            
-        except Exception as e:
-            self.log(f"Error merging down: {e}")
-            return False
-    
-    def merge_visible(self):
-        """Merge all visible layers"""
-        return self.show_not_implemented("Merge Visible")
-    
-    # Layer Organization Commands
-    def move_to_top(self):
-        """Move selected layer to top"""
-        try:
-            selected = self.get_selected_nodes()
-            if not selected:
-                self.log("No layer selected")
-                return False
-            
-            # Move to top by repeatedly moving up
-            for _ in range(10):  # Safety limit
-                try:
-                    substance_painter.layerstack.move_layers_up(selected)
-                except:
-                    break  # Can't move further up
-            return True
-            
-        except Exception as e:
-            self.log(f"Error moving to top: {e}")
-            return False
-    
-    def move_to_bottom(self):
-        """Move selected layer to bottom"""
-        try:
-            selected = self.get_selected_nodes()
-            if not selected:
-                self.log("No layer selected")
-                return False
-            
-            # Move to bottom by repeatedly moving down  
-            for _ in range(10):  # Safety limit
-                try:
-                    substance_painter.layerstack.move_layers_down(selected)
-                except:
-                    break  # Can't move further down
-            return True
-            
-        except Exception as e:
-            self.log(f"Error moving to bottom: {e}")
-            return False
-    
-    def group_selected_layers(self):
-        """Group selected layers"""
-        return self.show_not_implemented("Group Selected Layers")
-    
-    def ungroup_layers(self):
-        """Ungroup selected layers"""
-        return self.show_not_implemented("Ungroup Layers")
-    
-    # Layer Properties Commands
-    def show_layer(self):
-        """Show selected layer using real API"""
-        try:
-            selected = self.get_selected_nodes()
-            if not selected:
-                self.log("No layer selected")
-                return False
-            
-            # Show all selected layers
-            for node in selected:
-                node.set_visible(True)
-            return True
-            
-        except Exception as e:
-            self.log(f"Error showing layer: {e}")
-            return False
-    
-    def hide_layer(self):
-        """Hide selected layer using real API"""
-        try:
-            selected = self.get_selected_nodes()
-            if not selected:
-                self.log("No layer selected")
-                return False
-            
-            # Hide all selected layers
-            for node in selected:
-                node.set_visible(False)
-            return True
-            
-        except Exception as e:
-            self.log(f"Error hiding layer: {e}")
-            return False
-    
-    def toggle_layer_lock(self):
-        """Toggle lock state of selected layer"""
-        return self.show_not_implemented("Toggle Layer Lock")
-    
-    def lock_layer(self):
-        """Lock selected layer"""
-        return self.show_not_implemented("Lock Layer")
-    
-    def unlock_layer(self):
-        """Unlock selected layer"""
-        return self.show_not_implemented("Unlock Layer")
-    
-    def reset_layer_opacity(self):
-        """Reset layer opacity to 100%"""
-        return self.show_not_implemented("Reset Layer Opacity")
-    
-    # Blend Mode Commands
-    def set_blend_mode(self, mode):
-        """Set blend mode of selected layer"""
-        try:
-            selected = self.get_selected_nodes()
-            if not selected:
-                self.log("No layer selected")
-                return False
-            
-            # This would need the actual blend mode enum from the API
-            self.log(f"Set blend mode to {mode} (placeholder implementation)")
-            return True
-            
-        except Exception as e:
-            self.log(f"Error setting blend mode: {e}")
-            return False
-    
-    # Mask Commands using real API
     def add_layer_mask(self):
         """Add mask to selected layer using real API"""
         try:
             selected = self.get_selected_nodes()
             if not selected:
-                self.log("No layer selected")
-                return False
+                raise ValueError("No layer selected")
             
             layer = selected[0]
             if layer.has_mask():
-                self.log("Layer already has a mask")
-                return False
+                raise ValueError("Layer already has a mask")
             
             # Add mask with white background (default)
-            layer.add_mask(substance_painter.layerstack.MaskBackground.White)
+            layer.add_mask(MaskBackground.White)
             
             # Switch selection context to the mask for subsequent macro commands
+            from substance_painter.layerstack import set_selection_type, SelectionType
             set_selection_type(layer, SelectionType.Mask)
-            self.log("Added layer mask and switched to mask context")
+            substance_painter.logging.info("Added layer mask and switched to mask context")
             return True
             
         except Exception as e:
-            self.log(f"Error adding layer mask: {e}")
-            return False
+            raise ValueError(f"Error adding layer mask: {e}")
     
     def remove_layer_mask(self):
-        """Remove layer mask using real API"""
+        """Remove mask from selected layer using official API"""
         try:
             selected = self.get_selected_nodes()
             if not selected:
-                self.log("No layer selected")
-                return False
+                raise ValueError("No layer selected")
             
             layer = selected[0]
             if not layer.has_mask():
-                self.log("Layer has no mask to remove")
-                return False
+                raise ValueError("Layer has no mask to remove")
             
             layer.remove_mask()
-            self.log("Removed layer mask")
+            substance_painter.logging.info("Removed layer mask")
             return True
             
         except Exception as e:
-            self.log(f"Error removing layer mask: {e}")
-            return False
+            raise ValueError(f"Error removing layer mask: {e}")
     
-    def enable_layer_mask(self):
-        """Enable layer mask using real API"""
+    def toggle_mask(self):
+        """Toggle mask enable/disable using official API"""
+        stack = substance_painter.textureset.get_active_stack()
+        selected_nodes = get_selected_nodes(stack)
+        
+        if selected_nodes:
+            layer = selected_nodes[0]
+            if hasattr(layer, 'is_mask_enabled') and layer.has_mask():
+                current_state = layer.is_mask_enabled()
+                layer.enable_mask(not current_state)
+            else:
+                raise ValueError("Layer has no mask to toggle")
+        else:
+            raise ValueError("No layer selected")
+    
+    def set_mask_black(self):
+        """Set mask background to black using official API"""
+        stack = substance_painter.textureset.get_active_stack()
+        selected_nodes = get_selected_nodes(stack)
+        
+        if selected_nodes:
+            layer = selected_nodes[0]
+            if hasattr(layer, 'set_mask_background') and layer.has_mask():
+                layer.set_mask_background(MaskBackground.Black)
+            else:
+                raise ValueError("Layer has no mask")
+        else:
+            raise ValueError("No layer selected")
+    
+    def set_mask_white(self):
+        """Set mask background to white using official API"""
+        stack = substance_painter.textureset.get_active_stack()
+        selected_nodes = get_selected_nodes(stack)
+        
+        if selected_nodes:
+            layer = selected_nodes[0]
+            if hasattr(layer, 'set_mask_background') and layer.has_mask():
+                layer.set_mask_background(MaskBackground.White)
+            else:
+                raise ValueError("Layer has no mask")
+        else:
+            raise ValueError("No layer selected")
+    
+    # === SELECTION & DELETION ===
+    def delete_selected(self):
+        """Delete selected nodes using official API"""
+        stack = substance_painter.textureset.get_active_stack()
+        selected_nodes = get_selected_nodes(stack)
+        
+        if selected_nodes:
+            for node in selected_nodes:
+                delete_node(node)
+        else:
+            raise ValueError("No nodes selected")
+    
+    def select_content(self):
+        """Select layer content using official API"""
+        stack = substance_painter.textureset.get_active_stack()
+        selected_nodes = get_selected_nodes(stack)
+        
+        if selected_nodes:
+            layer = selected_nodes[0]
+            set_selection_type(layer, SelectionType.Content)
+        else:
+            raise ValueError("No layer selected")
+    
+    def select_mask(self):
+        """Select layer mask using official API"""
+        stack = substance_painter.textureset.get_active_stack()
+        selected_nodes = get_selected_nodes(stack)
+        
+        if selected_nodes:
+            layer = selected_nodes[0]
+            if hasattr(layer, 'has_mask') and layer.has_mask():
+                set_selection_type(layer, SelectionType.Mask)
+            else:
+                raise ValueError("Layer has no mask to select")
+        else:
+            raise ValueError("No layer selected")
+    
+    def select_properties(self):
+        """Select layer properties using official API"""
+        stack = substance_painter.textureset.get_active_stack()
+        selected_nodes = get_selected_nodes(stack)
+        
+        if selected_nodes:
+            layer = selected_nodes[0]
+            # Properties selection is only for instance layers
+            if hasattr(layer, 'instance_source'):
+                set_selection_type(layer, SelectionType.Properties)
+            else:
+                raise ValueError("Properties selection only available for instance layers")
+        else:
+            raise ValueError("No layer selected")
+
+    def get_procedural_resources(self):
+        """Get list of available procedural resources"""
         try:
-            selected = self.get_selected_nodes()
-            if not selected:
-                self.log("No layer selected")
-                return False
+            from substance_painter.resource import Usage
+            # First try to get all resources and filter by usage
+            all_resources = substance_painter.resource.search("")  # Get all resources
+            substance_painter.logging.info(f"Commander: Total resources found: {len(all_resources)}")
             
-            layer = selected[0]
-            if not layer.has_mask():
-                self.log("Layer has no mask")
-                return False
-            
-            layer.enable_mask(True)
-            self.log("Enabled layer mask")
-            return True
-            
-        except Exception as e:
-            self.log(f"Error enabling layer mask: {e}")
-            return False
-    
-    def disable_layer_mask(self):
-        """Disable layer mask using real API"""
-        try:
-            selected = self.get_selected_nodes()
-            if not selected:
-                self.log("No layer selected")
-                return False
-            
-            layer = selected[0]
-            if not layer.has_mask():
-                self.log("Layer has no mask")
-                return False
-            
-            layer.enable_mask(False)
-            self.log("Disabled layer mask")
-            return True
-            
-        except Exception as e:
-            self.log(f"Error disabling layer mask: {e}")
-            return False
-    
-    def set_mask_background_white(self):
-        """Set mask background to white using real API"""
-        try:
-            selected = self.get_selected_nodes()
-            if not selected:
-                self.log("No layer selected")
-                return False
-            
-            layer = selected[0]
-            if not layer.has_mask():
-                self.log("Layer has no mask")
-                return False
-            
-            layer.set_mask_background(substance_painter.layerstack.MaskBackground.White)
-            self.log("Set mask background to white")
-            return True
-            
-        except Exception as e:
-            self.log(f"Error setting mask background: {e}")
-            return False
-    
-    def set_mask_background_black(self):
-        """Set mask background to black using real API"""
-        try:
-            selected = self.get_selected_nodes()
-            if not selected:
-                self.log("No layer selected")
-                return False
-            
-            layer = selected[0]
-            if not layer.has_mask():
-                self.log("Layer has no mask")
-                return False
-            
-            layer.set_mask_background(substance_painter.layerstack.MaskBackground.Black)
-            self.log("Set mask background to black")
-            return True
-            
-        except Exception as e:
-            self.log(f"Error setting mask background: {e}")
-            return False
-    
-    # Selection Commands
-    def select_all_layers(self):
-        """Select all layers"""
-        return self.show_not_implemented("Select All Layers")
-    
-    def select_visible_layers(self):
-        """Select all visible layers"""
-        return self.show_not_implemented("Select Visible Layers")
-    
-    def select_locked_layers(self):
-        """Select all locked layers"""
-        return self.show_not_implemented("Select Locked Layers")
-    
-    def select_paint_layers(self):
-        """Select all paint layers"""
-        return self.show_not_implemented("Select Paint Layers")
-    
-    def select_fill_layers(self):
-        """Select all fill layers"""
-        return self.show_not_implemented("Select Fill Layers")
-    
-    def select_group_layers(self):
-        """Select all group layers"""
-        return self.show_not_implemented("Select Group Layers")
-    
-    def deselect_all_layers(self):
-        """Deselect all layers"""
-        return self.show_not_implemented("Deselect All Layers")
-    
-    # Channel Commands
-    def enable_channel(self, channel):
-        """Enable specific channel"""
-        self.log(f"Enable {channel} channel (placeholder implementation)")
-        return True
-    
-    def enable_all_channels(self):
-        """Enable all channels"""
-        return self.show_not_implemented("Enable All Channels")
-    
-    def disable_all_channels(self):
-        """Disable all channels"""
-        return self.show_not_implemented("Disable All Channels")
-    
-    # Stack Operations
-    def clear_stack(self):
-        """Clear the layer stack"""
-        return self.show_not_implemented("Clear Stack")
-    
-    def reset_stack(self):
-        """Reset the layer stack"""
-        return self.show_not_implemented("Reset Stack")
-    
-    # Naming Commands
-    def rename_selected_layer(self):
-        """Rename selected layer using real API"""
-        try:
-            selected = self.get_selected_nodes()
-            if not selected:
-                self.log("No layer selected")
-                return False
-            
-            layer = selected[0]  # Rename first selected layer
-            current_name = layer.get_name()
-            
-            # Ask user for new name
-            new_name, ok = QtWidgets.QInputDialog.getText(
-                self,
-                "Rename Layer",
-                "Layer name:",
-                QtWidgets.QLineEdit.Normal,
-                current_name
-            )
-            
-            if ok and new_name:
-                # Set new name using real API
-                layer.set_name(new_name)
-                self.log(f"Renamed layer to '{new_name}'")
-                return True
-            
-            return False
-            
-        except Exception as e:
-            self.log(f"Error renaming layer: {e}")
-            return False
-    
-    def set_layer_opacity(self):
-        """Set layer opacity using real API"""
-        try:
-            selected = self.get_selected_nodes()
-            if not selected:
-                self.log("No layer selected")
-                return False
-            
-            layer = selected[0]
-            
-            # Get current opacity for first available channel
-            current_opacity = 100  # Default
-            try:
-                # Try to get opacity for base color channel
-                from substance_painter.textureset import ChannelType
-                current_opacity = layer.get_opacity(ChannelType.BaseColor) * 100
-            except:
-                pass
-            
-            # Ask user for new opacity
-            opacity, ok = QtWidgets.QInputDialog.getDouble(
-                self,
-                "Set Layer Opacity",
-                "Opacity (0-100%):",
-                current_opacity,
-                0.0, 100.0, 1
-            )
-            
-            if ok:
-                # Set opacity using real API
-                opacity_normalized = opacity / 100.0
+            procedurals = []
+            for resource in all_resources:
                 try:
-                    from substance_painter.textureset import ChannelType
-                    layer.set_opacity(opacity_normalized, ChannelType.BaseColor)
-                    self.log(f"Set layer opacity to {opacity}%")
-                    return True
+                    # Check if this resource has procedural usage
+                    if hasattr(resource, 'usages'):
+                        usages = resource.usages()
+                        # Check if Usage.PROCEDURAL is in the usages
+                        if Usage.PROCEDURAL in usages:
+                            identifier = resource.identifier()
+                            procedurals.append({
+                                'name': resource.gui_name(),
+                                'category': resource.category() if hasattr(resource, 'category') else 'Unknown',
+                                'resource_id': identifier,
+                                'resource': resource
+                            })
+                            substance_painter.logging.info(f"Commander: Found procedural: {resource.gui_name()}")
                 except Exception as e:
-                    self.log(f"Error setting opacity: {e}")
+                    # Skip resources that cause errors - don't log each one
+                    continue
             
-            return False
-            
-        except Exception as e:
-            self.log(f"Error setting layer opacity: {e}")
-            return False
-    
-    def get_layer_opacity(self):
-        """Get layer opacity using real API"""
-        try:
-            selected = self.get_selected_nodes()
-            if not selected:
-                self.log("No layer selected")
-                return False
-            
-            layer = selected[0]
-            opacity = layer.get_opacity()
-            self.log(f"Layer opacity: {opacity:.2f}")
-            return True
+            substance_painter.logging.info(f"Commander: Final procedural count: {len(procedurals)}")
+            return procedurals
             
         except Exception as e:
-            self.log(f"Error getting layer opacity: {e}")
-            return False
+            substance_painter.logging.error(f"Error searching for procedural resources: {e}")
+            import traceback
+            substance_painter.logging.error(f"Traceback: {traceback.format_exc()}")
+            return []
     
-    def set_blend_mode(self):
-        """Set blend mode - requires dialog for selection"""
-        self.log("Blend mode selection requires dialog")
-        return False
-    
-    def get_blend_mode(self):
-        """Get current blend mode"""
+    def apply_procedural(self, procedural_data):
+        """Apply a procedural resource to a fill effect"""
         try:
-            selected = self.get_selected_nodes()
-            if not selected:
-                self.log("No layer selected")
-                return False
+            # Get the resource from procedural_data
+            resource = procedural_data.get('resource')
+            if not resource:
+                raise ValueError("No resource found in procedural data")
             
-            layer = selected[0]
-            blend_mode = layer.get_blending_mode()
-            self.log(f"Blend mode: {blend_mode}")
-            return True
+            # Get current selection and context
+            stack = substance_painter.textureset.get_active_stack()
+            selected_nodes = get_selected_nodes(stack)
             
-        except Exception as e:
-            self.log(f"Error getting blend mode: {e}")
-            return False
-    
-    # =====================================================
-    # NEW METHODS USING REAL SUBSTANCE PAINTER API
-    # =====================================================
-    
-    def create_layer_instance(self):
-        """Create an instance of selected layer using real API"""
-        try:
-            selected = self.get_selected_nodes()
-            if not selected:
-                self.log("No layer selected to instance")
-                return False
-            
-            stack = self.get_active_stack()
-            if not stack:
-                return False
-            
-            source_layer = selected[0]
-            insert_pos = InsertPosition.from_textureset_stack(stack)
-            instance = substance_painter.layerstack.instantiate(insert_pos, source_layer)
-            instance.set_name(f"Instance of {source_layer.get_name()}")
-            self.log(f"✓ Created instance of '{source_layer.get_name()}'")
-            return True
-            
-        except Exception as e:
-            self.log(f"Error creating layer instance: {e}")
-            return False
-    
-    # === Helper Method for Smart Effect Insertion ===
-    def get_smart_insert_position(self, layer):
-        """Get insert position based on current selection (content vs mask)"""
-        try:
-            # Check what part of the layer is currently selected
-            selection_type = substance_painter.layerstack.get_selection_type(layer)
-            
-            if selection_type == SelectionType.Mask:
-                # User selected the mask - insert into mask stack
-                return InsertPosition.inside_node(layer, NodeStack.Mask)
-            else:
-                # Default to content stack for Content, GeometryMask, or Properties selection
-                return InsertPosition.inside_node(layer, NodeStack.Content)
+            # Determine insertion context
+            if selected_nodes:
+                layer = selected_nodes[0]
+                # Check selection type to determine context (mask vs content)
+                selection_type = substance_painter.layerstack.get_selection_type(layer)
                 
-        except Exception as e:
-            # Fallback to content stack if selection detection fails
-            self.log(f"Could not detect selection type, defaulting to content: {e}")
-            return InsertPosition.inside_node(layer, NodeStack.Content)
-    
-    # === Effect Creation Methods ===
-    def insert_levels_effect(self):
-        """Insert levels effect using real API - detects content vs mask"""
-        try:
-            selected = self.get_selected_nodes()
-            if not selected:
-                self.log("No layer selected")
-                return False
-            
-            layer = selected[0]
-            insert_pos = self.get_smart_insert_position(layer)
-            effect = substance_painter.layerstack.insert_levels_effect(insert_pos)
-            effect.set_name("Levels")
-            
-            # Show where it was inserted
-            stack_type = "mask" if insert_pos.node_stack == NodeStack.Mask else "content"
-            self.log(f"✓ Inserted levels effect in {stack_type}")
-            return True
-            
-        except Exception as e:
-            self.log(f"Error inserting levels effect: {e}")
-            return False
-    
-    def insert_filter_effect(self):
-        """Insert filter effect using real API - detects content vs mask"""
-        try:
-            selected = self.get_selected_nodes()
-            if not selected:
-                self.log("No layer selected")
-                return False
-            
-            layer = selected[0]
-            insert_pos = self.get_smart_insert_position(layer)
-            effect = substance_painter.layerstack.insert_filter_effect(insert_pos)
-            effect.set_name("Filter")
-            
-            stack_type = "mask" if insert_pos.node_stack == NodeStack.Mask else "content"
-            self.log(f"✓ Inserted filter effect in {stack_type}")
-            return True
-            
-        except Exception as e:
-            self.log(f"Error inserting filter effect: {e}")
-            return False
-    
-    def insert_fill_effect(self):
-        """Insert fill effect using real API - detects content vs mask"""
-        try:
-            selected = self.get_selected_nodes()
-            if not selected:
-                self.log("No layer selected")
-                return False
-            
-            layer = selected[0]
-            insert_pos = self.get_smart_insert_position(layer)
-            # insert_fill() creates FillEffectNode when inserting into effect stack
-            effect = substance_painter.layerstack.insert_fill(insert_pos)
-            effect.set_name("Fill")
-            
-            stack_type = "mask" if insert_pos.node_stack == NodeStack.Mask else "content"
-            self.log(f"✓ Inserted fill effect in {stack_type}")
-            return True
-            
-        except Exception as e:
-            self.log(f"Error inserting fill effect: {e}")
-            return False
-    
-    def insert_paint_effect(self):
-        """Insert paint effect using real API - detects content vs mask"""
-        try:
-            selected = self.get_selected_nodes()
-            if not selected:
-                self.log("No layer selected")
-                return False
-            
-            layer = selected[0]
-            insert_pos = self.get_smart_insert_position(layer)
-            # insert_paint() creates PaintEffectNode when inserting into effect stack
-            effect = substance_painter.layerstack.insert_paint(insert_pos)
-            effect.set_name("Paint")
-            
-            stack_type = "mask" if insert_pos.node_stack == NodeStack.Mask else "content"
-            self.log(f"✓ Inserted paint effect in {stack_type}")
-            
-            return True
-            
-        except Exception as e:
-            self.log(f"Error inserting paint effect: {e}")
-            return False
-    
-    def insert_generator_effect(self):
-        """Insert generator effect using real API - detects content vs mask"""
-        try:
-            selected = self.get_selected_nodes()
-            if not selected:
-                self.log("No layer selected")
-                return False
-            
-            layer = selected[0]
-            insert_pos = self.get_smart_insert_position(layer)
-            effect = substance_painter.layerstack.insert_generator_effect(insert_pos)
-            effect.set_name("Generator")
-            
-            stack_type = "mask" if insert_pos.node_stack == NodeStack.Mask else "content"
-            self.log(f"✓ Inserted generator effect in {stack_type}")
-            return True
-            
-        except Exception as e:
-            self.log(f"Error inserting generator effect: {e}")
-            return False
-    
-    def insert_compare_mask_effect(self):
-        """Insert compare mask effect using real API - smart mask detection"""
-        try:
-            selected = self.get_selected_nodes()
-            if not selected:
-                self.log("No layer selected")
-                return False
-            
-            layer = selected[0]
-            # Compare mask effects work best in masks, but respect user selection
-            insert_pos = self.get_smart_insert_position(layer)
-            
-            # If user selected content but layer has no mask, suggest adding one
-            if insert_pos.node_stack == NodeStack.Content:
-                if hasattr(layer, 'has_mask') and not layer.has_mask():
-                    self.log("Tip: Compare Mask works better with a layer mask. Consider adding one first.")
-            
-            effect = substance_painter.layerstack.insert_compare_mask_effect(insert_pos)
-            effect.set_name("Compare Mask")
-            
-            stack_type = "mask" if insert_pos.node_stack == NodeStack.Mask else "content"
-            self.log(f"✓ Inserted compare mask effect in {stack_type}")
-            return True
-            
-        except Exception as e:
-            self.log(f"Error inserting compare mask effect: {e}")
-            return False
-    
-    def insert_color_selection_effect(self):
-        """Insert color selection effect using real API - smart mask detection"""
-        try:
-            selected = self.get_selected_nodes()
-            if not selected:
-                self.log("No layer selected")
-                return False
-            
-            layer = selected[0]
-            # Color selection effects work best in masks, but respect user selection
-            insert_pos = self.get_smart_insert_position(layer)
-            
-            # If user selected content but layer has no mask, suggest adding one
-            if insert_pos.node_stack == NodeStack.Content:
-                if hasattr(layer, 'has_mask') and not layer.has_mask():
-                    self.log("Tip: Color Selection works better with a layer mask. Consider adding one first.")
-            
-            effect = substance_painter.layerstack.insert_color_selection_effect(insert_pos)
-            effect.set_name("Color Selection")
-            
-            stack_type = "mask" if insert_pos.node_stack == NodeStack.Mask else "content"
-            self.log(f"✓ Inserted color selection effect in {stack_type}")
-            return True
-            
-        except Exception as e:
-            self.log(f"Error inserting color selection effect: {e}")
-            return False
-    
-    def insert_anchor_point_effect(self):
-        """Insert anchor point effect using real API - detects content vs mask"""
-        try:
-            selected = self.get_selected_nodes()
-            if not selected:
-                self.log("No layer selected")
-                return False
-            
-            layer = selected[0]
-            insert_pos = self.get_smart_insert_position(layer)
-            effect = substance_painter.layerstack.insert_anchor_point_effect(insert_pos, "Anchor")
-            
-            stack_type = "mask" if insert_pos.node_stack == NodeStack.Mask else "content"
-            self.log(f"✓ Inserted anchor point effect in {stack_type}")
-            return True
-            
-        except Exception as e:
-            self.log(f"Error inserting anchor point effect: {e}")
-            return False
-    
-    # === Layer Mask Methods (Real API) ===
-    def remove_layer_mask(self):
-        """Remove layer mask using real API"""
-        try:
-            selected = self.get_selected_nodes()
-            if not selected:
-                self.log("No layer selected")
-                return False
-            
-            layer = selected[0]
-            if not hasattr(layer, 'has_mask') or not layer.has_mask():
-                self.log("Layer has no mask to remove")
-                return False
-            
-            layer.remove_mask()
-            self.log("✓ Removed layer mask")
-            return True
-            
-        except Exception as e:
-            self.log(f"Error removing layer mask: {e}")
-            return False
-    
-    def set_mask_background_white(self):
-        """Set mask background to white using real API"""
-        try:
-            selected = self.get_selected_nodes()
-            if not selected:
-                self.log("No layer selected")
-                return False
-            
-            layer = selected[0]
-            if not hasattr(layer, 'has_mask') or not layer.has_mask():
-                self.log("Layer has no mask")
-                return False
-            
-            layer.set_mask_background(MaskBackground.White)
-            self.log("✓ Set mask background to white")
-            return True
-            
-        except Exception as e:
-            self.log(f"Error setting mask background: {e}")
-            return False
-    
-    def set_mask_background_black(self):
-        """Set mask background to black using real API"""
-        try:
-            selected = self.get_selected_nodes()
-            if not selected:
-                self.log("No layer selected")
-                return False
-            
-            layer = selected[0]
-            if not hasattr(layer, 'has_mask') or not layer.has_mask():
-                self.log("Layer has no mask")
-                return False
-            
-            layer.set_mask_background(MaskBackground.Black)
-            self.log("✓ Set mask background to black")
-            return True
-            
-        except Exception as e:
-            self.log(f"Error setting mask background: {e}")
-            return False
-    
-    # === Placeholder methods for Smart Materials/Masks ===
-    def insert_smart_material(self):
-        """Insert smart material - requires resource selection"""
-        self.log("Smart material insertion requires resource selection dialog")
-        return False
-    
-    def create_smart_material(self):
-        """Create smart material from selected group"""
-        self.log("Smart material creation requires name input dialog")  
-        return False
-    
-    def insert_smart_mask(self):
-        """Insert smart mask - requires resource selection"""
-        self.log("Smart mask insertion requires resource selection dialog")
-        return False
-    
-    def create_smart_mask(self):
-        """Create smart mask from selected layer"""
-        self.log("Smart mask creation requires name input dialog")
-        return False
-    
-    # === Geometry Mask Methods ===
-    def set_geometry_mask_mesh(self):
-        """Set geometry mask type to mesh"""
-        try:
-            selected = self.get_selected_nodes()
-            if not selected:
-                self.log("No layer selected")
-                return False
-            
-            layer = selected[0]
-            if hasattr(layer, 'set_geometry_mask_type'):
-                layer.set_geometry_mask_type(GeometryMaskType.Mesh)
-                self.log("✓ Set geometry mask to mesh")
-                return True
+                if selection_type == SelectionType.Mask:
+                    # Insert as fill effect in mask stack (grayscale)
+                    if not layer.has_mask():
+                        layer.add_mask(MaskBackground.Black)
+                    insert_position = InsertPosition.inside_node(layer, NodeStack.Mask)
+                    context_name = "mask"
+                else:
+                    # Insert as fill effect in content stack (roughness)
+                    insert_position = InsertPosition.inside_node(layer, NodeStack.Content)
+                    context_name = "content"
             else:
-                self.log("Selected node doesn't support geometry masks")
-                return False
+                # No selection - create at top of stack
+                insert_position = InsertPosition.from_textureset_stack(stack)
+                context_name = "content"
             
-        except Exception as e:
-            self.log(f"Error setting geometry mask: {e}")
-            return False
-    
-    def set_geometry_mask_uv_tile(self):
-        """Set geometry mask type to UV tile"""
-        try:
-            selected = self.get_selected_nodes()
-            if not selected:
-                self.log("No layer selected")
-                return False
+            # Create the fill effect
+            effect = insert_fill(insert_position)
+            effect.set_name(f"{procedural_data['name']}")
             
-            layer = selected[0]
-            if hasattr(layer, 'set_geometry_mask_type'):
-                layer.set_geometry_mask_type(GeometryMaskType.UVTile)
-                self.log("✓ Set geometry mask to UV tile")
-                return True
+            # Apply the procedural resource to the effect
+            # Get the resource ID from the procedural data
+            resource_id = resource.identifier()
+            
+            if context_name == "mask":
+                # For masks, set to grayscale channel (channel type = None)
+                effect.set_source(None, resource_id)
+                substance_painter.logging.info(f"Commander: Applied procedural to mask (grayscale)")
             else:
-                self.log("Selected node doesn't support geometry masks")
-                return False
+                # For content, target Roughness channel with BaseColor fallback
+                # The correct signature is: set_source(channel_type, resource_id)
+                try:
+                    # Try to set source to Roughness channel - CHANNEL TYPE FIRST!
+                    effect.set_source(ChannelType.Roughness, resource_id)
+                    substance_painter.logging.info(f"Commander: Applied to Roughness channel")
+                except Exception as e:
+                    # Fallback to BaseColor if Roughness fails
+                    try:
+                        effect.set_source(ChannelType.BaseColor, resource_id)
+                        substance_painter.logging.info(f"Commander: Applied to BaseColor channel")
+                    except Exception as fallback_error:
+                        # Final fallback - no channel specification
+                        effect.set_source(resource_id)
+                        substance_painter.logging.info(f"Commander: Applied to default channel")
+            
+            return f"✓ Applied procedural '{procedural_data['name']}' as fill effect in {context_name}"
             
         except Exception as e:
-            self.log(f"Error setting geometry mask: {e}")
-            return False
-    
-    def enable_geometry_mask(self):
-        """Enable geometry mask"""
-        self.log("Geometry mask mesh selection requires dialog")
-        return False
-    
-    # === Projection Mode Methods ===
-    def set_projection_uv(self):
-        """Set projection mode to UV"""
-        return self._set_projection_mode(ProjectionMode.UV, "UV")
-    
-    def set_projection_triplanar(self):
-        """Set projection mode to triplanar"""
-        return self._set_projection_mode(ProjectionMode.Triplanar, "Triplanar")
-    
-    def set_projection_planar(self):
-        """Set projection mode to planar"""
-        return self._set_projection_mode(ProjectionMode.Planar, "Planar")
-    
-    def set_projection_spherical(self):
-        """Set projection mode to spherical"""
-        return self._set_projection_mode(ProjectionMode.Spherical, "Spherical")
-    
-    def set_projection_cylindrical(self):
-        """Set projection mode to cylindrical"""
-        return self._set_projection_mode(ProjectionMode.Cylindrical, "Cylindrical")
-    
-    def _set_projection_mode(self, mode, mode_name):
-        """Helper to set projection mode"""
-        try:
-            selected = self.get_selected_nodes()
-            if not selected:
-                self.log("No layer selected")
-                return False
-            
-            layer = selected[0]
-            if hasattr(layer, 'set_projection_mode'):
-                layer.set_projection_mode(mode)
-                self.log(f"✓ Set projection mode to {mode_name}")
-                return True
-            else:
-                self.log("Selected layer doesn't support projection modes")
-                return False
-            
-        except Exception as e:
-            self.log(f"Error setting projection mode: {e}")
-            return False
-    
-    def enable_symmetry(self):
-        """Enable symmetry"""
-        return self._set_symmetry(True)
-    
-    def disable_symmetry(self):
-        """Disable symmetry"""
-        return self._set_symmetry(False)
-    
-    def _set_symmetry(self, enabled):
-        """Helper to set symmetry state"""
-        try:
-            selected = self.get_selected_nodes()
-            if not selected:
-                self.log("No layer selected")
-                return False
-            
-            layer = selected[0]
-            if hasattr(layer, 'set_symmetry_enabled'):
-                layer.set_symmetry_enabled(enabled)
-                state = "enabled" if enabled else "disabled"
-                self.log(f"✓ {state.capitalize()} symmetry")
-                return True
-            else:
-                self.log("Selected layer doesn't support symmetry")
-                return False
-            
-        except Exception as e:
-            self.log(f"Error setting symmetry: {e}")
-            return False
+            raise ValueError(f"Failed to apply procedural: {e}")
 
-    # Helper method for unimplemented commands
-    def show_not_implemented(self, command_name):
-        """Show message for commands not yet implemented"""
-        self.log(f"'{command_name}' is not yet implemented")
-        QtWidgets.QMessageBox.information(
-            self,
-            "Not Implemented", 
-            f"The command '{command_name}' is not yet implemented.\n\nThis will be added in a future version."
-        )
-        return False
+def show_commander():
+    """Show dock widget at cursor OR refocus if already visible"""
+    global DOCK_WIDGET, COMMANDER_WIDGET
     
-    # Update legacy method names to use new implementations
-    def duplicate_selected_layers(self):
-        """Duplicate the selected layers"""
-        return self.duplicate_selected_layer()
+    if not DOCK_WIDGET or not COMMANDER_WIDGET:
+        return
     
-    def delete_selected_layers(self):
-        """Delete the selected layers"""
-        return self.delete_selected_layer()
+    # If dock is already visible, just refocus the search input
+    if DOCK_WIDGET.isVisible():
+        DOCK_WIDGET.raise_()
+        DOCK_WIDGET.activateWindow()
+        COMMANDER_WIDGET.search_input.setFocus()
+        COMMANDER_WIDGET.search_input.selectAll()
+        
+        # Select first visible item for immediate arrow navigation
+        if COMMANDER_WIDGET.results_list.count() > 0:
+            # Find first visible item (not hidden by search filter)
+            for i in range(COMMANDER_WIDGET.results_list.count()):
+                item = COMMANDER_WIDGET.results_list.item(i)
+                if not item.isHidden():
+                    COMMANDER_WIDGET.results_list.setCurrentRow(i)
+                    break
+        return
     
-    def move_layers_up(self):
-        """Move layers up"""
-        return self.move_layer_up()
+    # Dock is hidden - show it at cursor position
+    # Get cursor position
+    cursor_pos = QtGui.QCursor.pos()
     
-    def move_layers_down(self):
-        """Move layers down"""  
-        return self.move_layer_down()
-
-# Simplified - no global event filter needed
+    # Get screen geometry for bounds checking
+    screen = QtWidgets.QApplication.primaryScreen().geometry()
+    
+    # Set floating and move to cursor
+    DOCK_WIDGET.setFloating(True)
+    
+    # Calculate size and position
+    size = DOCK_WIDGET.sizeHint()
+    x = cursor_pos.x()
+    y = cursor_pos.y()
+    
+    # Keep within screen bounds
+    if x + size.width() > screen.right():
+        x = max(0, screen.right() - size.width())
+    if y + size.height() > screen.bottom():
+        y = max(0, cursor_pos.y() - size.height())
+    
+    # Position and show
+    DOCK_WIDGET.move(x, y)
+    DOCK_WIDGET.show()
+    DOCK_WIDGET.raise_()
+    DOCK_WIDGET.activateWindow()
+    
+    # Focus search input and select first item for arrow navigation
+    COMMANDER_WIDGET.search_input.setFocus()
+    COMMANDER_WIDGET.search_input.selectAll()
+    
+    # Select first item in results for immediate arrow navigation
+    if COMMANDER_WIDGET.results_list.count() > 0:
+        COMMANDER_WIDGET.results_list.setCurrentRow(0)
 
 def start_plugin():
-    """Start Commander plugin using Adobe pattern"""
-    global MAIN_WINDOW
+    """STABLE DOCK WIDGET with popup-like behavior - No crashes!"""
+    global COMMANDER_WIDGET, COMMANDER_SHORTCUT, DOCK_WIDGET
     
     try:
-        # Create main window with proper parent
-        MAIN_WINDOW = CommanderWidget(substance_painter.ui.get_main_window())
+        # Create Commander widget  
+        COMMANDER_WIDGET = CommanderWidget()
         
-        # Add to Substance Painter UI as dock widget (explicitly specify Edition mode)
-        from substance_painter.ui import UIMode
-        dock_widget = substance_painter.ui.add_dock_widget(MAIN_WINDOW, UIMode.Edition)
-        WIDGETS.append(MAIN_WINDOW)
-        WIDGETS.append(dock_widget)  # Also keep reference to dock widget
+        # Create dock widget
+        DOCK_WIDGET = substance_painter.ui.add_dock_widget(COMMANDER_WIDGET)
+        DOCK_WIDGET.hide()  # Hidden by default
         
-        # Store dock widget reference in main window for shortcut access
-        MAIN_WINDOW.dock_widget = dock_widget
+        # Create keyboard shortcut
+        main_window = substance_painter.ui.get_main_window()
+        from PySide6.QtGui import QShortcut
+        COMMANDER_SHORTCUT = QShortcut(QtGui.QKeySequence("Ctrl+;"), main_window)
+        COMMANDER_SHORTCUT.activated.connect(show_commander)
         
-        # Log dock widget details
-        substance_painter.logging.info(f"Commander dock widget created: {dock_widget.windowTitle()}")
-        substance_painter.logging.info(f"Dock widget visible: {dock_widget.isVisible()}")
-        substance_painter.logging.info(f"Dock widget floating: {dock_widget.isFloating()}")
-        substance_painter.logging.info(f"Widget has icon: {not MAIN_WINDOW.windowIcon().isNull()}")
-        substance_painter.logging.info(f"Widget object name: {MAIN_WINDOW.objectName()}")
-        
-        # Configure dock widget for command palette behavior
-        dock_widget.setFloating(True)  # Make it floating for popup behavior
-        dock_widget.hide()  # Hide initially - will show on shortcut
-        
-        # Fix background color issue - set consistent styling
-        try:
-            # Apply consistent background styling to avoid blue background
-            style_sheet = """
-                QWidget {
-                    background-color: #2b2b2b;  /* Dark background like SP panels */
-                }
-                QLineEdit {
-                    background-color: #3c3c3c;
-                    border: 1px solid #555;
-                    padding: 4px;
-                    color: white;
-                }
-                QListWidget {
-                    background-color: #2b2b2b;
-                    border: 1px solid #555;
-                    color: white;
-                    selection-background-color: #404040;  /* Darker gray instead of blue */
-                    selection-color: white;  /* Ensure selected text stays white */
-                }
-                QLabel {
-                    background-color: transparent;
-                }
-                QDockWidget {
-                    background-color: #2b2b2b;  /* Fix dock widget container background */
-                }
-                QDockWidget::title {
-                    background-color: #3c3c3c;
-                    color: white;
-                    padding: 4px;
-                }
-            """
-            
-            # Apply styling to both the main widget AND the dock widget container
-            MAIN_WINDOW.setStyleSheet(style_sheet)
-            dock_widget.setStyleSheet(style_sheet)
-            
-        except Exception as style_error:
-            substance_painter.logging.info(f"Could not apply custom styling: {style_error}")
-        
-        # Install event filter to detect outside clicks
-        MAIN_WINDOW.installEventFilter(MAIN_WINDOW)
-        dock_widget.installEventFilter(MAIN_WINDOW)
-        
-        # Create global keyboard shortcuts without menu
-        try:
-            main_window = substance_painter.ui.get_main_window()
-            
-            # Add Commander action with Ctrl+; shortcut (no menu needed)
-            commander_action = QtGui.QAction("Open Commander", main_window)
-            commander_action.setToolTip("Quick access to layer operations")
-            commander_action.triggered.connect(MAIN_WINDOW.show_commander_from_shortcut)
-            commander_action.setShortcut(QtGui.QKeySequence("Ctrl+;"))
-            main_window.addAction(commander_action)  # Add directly to main window
-            WIDGETS.append(commander_action)
-            
-            # Also try Ctrl+` as alternative (backtick key)
-            commander_action_alt = QtGui.QAction("Open Commander Alt", main_window)
-            commander_action_alt.setToolTip("Alternative shortcut for Commander")
-            commander_action_alt.triggered.connect(MAIN_WINDOW.show_commander_from_shortcut)
-            commander_action_alt.setShortcut(QtGui.QKeySequence("Ctrl+`"))
-            main_window.addAction(commander_action_alt)
-            WIDGETS.append(commander_action_alt)
-            
-            substance_painter.logging.info("Commander shortcuts (Ctrl+; and Ctrl+`) created successfully")
-            
-        except Exception as shortcut_error:
-            substance_painter.logging.error(f"Could not create shortcuts: {shortcut_error}")
-        
-        substance_painter.logging.info("Commander Plugin started with keyboard shortcuts - Ctrl+; or Ctrl+` to open Commander")
+        substance_painter.logging.info("Commander Plugin started - STABLE DOCK with popup behavior")
         
     except Exception as e:
         substance_painter.logging.error(f"Failed to start Commander Plugin: {e}")
+        import traceback
+        traceback.print_exc()
 
 def close_plugin():
-    """Close Commander plugin using Adobe pattern"""
-    global MAIN_WINDOW
+    """STABLE DOCK cleanup - No crashes!"""
+    global COMMANDER_WIDGET, COMMANDER_SHORTCUT, DOCK_WIDGET
     
-    try:
+    substance_painter.logging.info("Commander: Starting stable dock cleanup")
+    
+    # Clean up shortcut
+    if COMMANDER_SHORTCUT:
+        try:
+            COMMANDER_SHORTCUT.activated.disconnect()
+            COMMANDER_SHORTCUT.setParent(None)
+            COMMANDER_SHORTCUT.deleteLater()
+        except Exception as e:
+            substance_painter.logging.error(f"Error cleaning up shortcut: {e}")
+        COMMANDER_SHORTCUT = None
+    
+    # Clean up dock widget (uses official API)
+    if DOCK_WIDGET:
+        try:
+            substance_painter.ui.delete_ui_element(DOCK_WIDGET)
+        except Exception as e:
+            substance_painter.logging.error(f"Error cleaning up dock: {e}")
+        DOCK_WIDGET = None
         
-        # Stop any timers if they exist
-        if MAIN_WINDOW and hasattr(MAIN_WINDOW, 'timer'):
-            try:
-                MAIN_WINDOW.timer.stop()
-                MAIN_WINDOW.timer.deleteLater()
-            except:
-                pass
-        
-        # Unregister all macro hotkeys
-        if MAIN_WINDOW and hasattr(MAIN_WINDOW, 'macro_actions'):
-            try:
-                for macro_name in list(MAIN_WINDOW.macro_actions.keys()):
-                    MAIN_WINDOW.unregister_macro_hotkey(macro_name)
-                substance_painter.logging.info("Unregistered all macro hotkeys")
-            except Exception as e:
-                substance_painter.logging.info(f"Error cleaning up macro hotkeys: {e}")
-        
-        # Clean up any active dialogs
-        if MAIN_WINDOW and hasattr(MAIN_WINDOW, 'active_dialogs'):
-            for dialog in MAIN_WINDOW.active_dialogs:
-                try:
-                    dialog.close()
-                    dialog.deleteLater()
-                except:
-                    pass
-        
-        # Clean up main window Qt objects
-        if MAIN_WINDOW:
-            try:
-                # Clean up any Qt child objects
-                if hasattr(MAIN_WINDOW, 'search_input'):
-                    MAIN_WINDOW.search_input.deleteLater()
-                if hasattr(MAIN_WINDOW, 'results_list'):
-                    MAIN_WINDOW.results_list.deleteLater()
-                if hasattr(MAIN_WINDOW, 'status_label'):
-                    MAIN_WINDOW.status_label.deleteLater()
-            except:
-                pass
-        
-        # Clean up all widgets using SP API - minimal approach
-        for widget in WIDGETS:
-            try:
-                # Just use SP's delete_ui_element - don't do any manual manipulation
-                substance_painter.ui.delete_ui_element(widget)
-            except Exception as e:
-                # Ignore cleanup failures - they're often expected during shutdown
-                pass
-        
-        # Clear references
-        WIDGETS.clear()
-        MAIN_WINDOW = None
-        
-        substance_painter.logging.info("Commander Plugin closed")
-        
-    except Exception as e:
-        substance_painter.logging.error(f"Error closing Commander Plugin: {e}")
+    COMMANDER_WIDGET = None
+    substance_painter.logging.info("Commander Plugin closed - Stable cleanup complete")
 
 if __name__ == "__main__":
     start_plugin()
