@@ -77,7 +77,7 @@ import substance_painter.textureset
 import substance_painter.resource
 from substance_painter.layerstack import (
     InsertPosition, NodeStack, MaskBackground, GeometryMaskType, ProjectionMode,
-    SelectionType, delete_node, get_selected_nodes, set_selected_nodes, set_selection_type,
+    SelectionType, BlendingMode, delete_node, get_selected_nodes, set_selected_nodes, set_selection_type,
     insert_fill, insert_paint, insert_group, instantiate,
     insert_levels_effect, insert_compare_mask_effect, insert_filter_effect,
     insert_generator_effect, insert_anchor_point_effect, insert_color_selection_effect,
@@ -1205,6 +1205,113 @@ class CommanderWidget(QtWidgets.QWidget):
             substance_painter.logging.error(f"Commander: Error during manual procedural refresh: {e}")
     
     # ---- End Procedural System ----
+    
+    def set_layer_opacity(self):
+        """Set opacity for selected layer using official API"""
+        stack = substance_painter.textureset.get_active_stack()
+        selected_nodes = get_selected_nodes(stack)
+        
+        if selected_nodes:
+            layer = selected_nodes[0]
+            if layer.has_blending():
+                # Prompt user for opacity value
+                opacity, ok = QtWidgets.QInputDialog.getDouble(
+                    self, "Set Layer Opacity", "Enter opacity (0.0 - 1.0):",
+                    layer.get_opacity() if not layer.is_in_mask_stack() else layer.get_opacity(),
+                    0.0, 1.0, 2
+                )
+                if ok:
+                    if layer.is_in_mask_stack():
+                        layer.set_opacity(opacity)  # No channel needed for mask
+                        substance_painter.logging.info(f"Set mask opacity to {opacity}")
+                    else:
+                        # For content layers, prompt for channel or apply to all channels
+                        layer.set_opacity(opacity)  # This will apply to all channels if no channel specified
+                        substance_painter.logging.info(f"Set layer opacity to {opacity}")
+            else:
+                raise ValueError("Selected layer does not support opacity")
+        else:
+            raise ValueError("No layer selected")
+    
+    def get_layer_opacity(self):
+        """Get opacity of selected layer using official API"""
+        stack = substance_painter.textureset.get_active_stack()
+        selected_nodes = get_selected_nodes(stack)
+        
+        if selected_nodes:
+            layer = selected_nodes[0]
+            if layer.has_blending():
+                opacity = layer.get_opacity() if layer.is_in_mask_stack() else layer.get_opacity()
+                substance_painter.logging.info(f"Layer '{layer.get_name()}' opacity: {opacity}")
+                self.status_label.setText(f"Layer opacity: {opacity}")
+            else:
+                raise ValueError("Selected layer does not support opacity")
+        else:
+            raise ValueError("No layer selected")
+    
+    def set_blend_mode(self):
+        """Set blend mode for selected layer using official API"""
+        stack = substance_painter.textureset.get_active_stack()
+        selected_nodes = get_selected_nodes(stack)
+        
+        if selected_nodes:
+            layer = selected_nodes[0]
+            if layer.has_blending():
+                # Get available blend modes
+                blend_modes = [
+                    "Normal", "PassThrough", "Disable", "Replace", "Multiply", "Divide", 
+                    "InverseDivide", "Darken", "Lighten", "LinearDodge", "Subtract", 
+                    "InverseSubtract", "Difference", "Exclusion", "SignedAddition", 
+                    "Overlay", "Screen", "LinearBurn", "ColorBurn", "ColorDodge", 
+                    "SoftLight", "HardLight", "VividLight", "LinearLight", "PinLight", 
+                    "Tint", "Saturation", "Color", "Value", "NormalMapCombine", 
+                    "NormalMapDetail", "NormalMapInverseDetail"
+                ]
+                
+                # Get current blend mode
+                current_mode = layer.get_blending_mode() if layer.is_in_mask_stack() else layer.get_blending_mode()
+                current_index = 0
+                try:
+                    current_index = blend_modes.index(current_mode.name)
+                except:
+                    pass
+                
+                # Prompt user for blend mode
+                blend_mode_name, ok = QtWidgets.QInputDialog.getItem(
+                    self, "Set Blend Mode", "Select blend mode:",
+                    blend_modes, current_index, False
+                )
+                
+                if ok and blend_mode_name:
+                    # Convert string to BlendingMode enum
+                    blend_mode = getattr(BlendingMode, blend_mode_name)
+                    
+                    if layer.is_in_mask_stack():
+                        layer.set_blending_mode(blend_mode)  # No channel needed for mask
+                        substance_painter.logging.info(f"Set mask blend mode to {blend_mode_name}")
+                    else:
+                        layer.set_blending_mode(blend_mode)  # This will apply to all channels if no channel specified
+                        substance_painter.logging.info(f"Set layer blend mode to {blend_mode_name}")
+            else:
+                raise ValueError("Selected layer does not support blending")
+        else:
+            raise ValueError("No layer selected")
+    
+    def get_blend_mode(self):
+        """Get blend mode of selected layer using official API"""
+        stack = substance_painter.textureset.get_active_stack()
+        selected_nodes = get_selected_nodes(stack)
+        
+        if selected_nodes:
+            layer = selected_nodes[0]
+            if layer.has_blending():
+                blend_mode = layer.get_blending_mode() if layer.is_in_mask_stack() else layer.get_blending_mode()
+                substance_painter.logging.info(f"Layer '{layer.get_name()}' blend mode: {blend_mode.name}")
+                self.status_label.setText(f"Layer blend mode: {blend_mode.name}")
+            else:
+                raise ValueError("Selected layer does not support blending")
+        else:
+            raise ValueError("No layer selected")
     
     def start_project_monitoring(self):
         """Start monitoring project state changes for automatic procedural loading"""
