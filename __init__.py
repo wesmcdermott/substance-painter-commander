@@ -77,7 +77,7 @@ import substance_painter.textureset
 import substance_painter.resource
 from substance_painter.layerstack import (
     InsertPosition, NodeStack, MaskBackground, GeometryMaskType, ProjectionMode,
-    SelectionType, delete_node, get_selected_nodes, set_selection_type,
+    SelectionType, delete_node, get_selected_nodes, set_selected_nodes, set_selection_type,
     insert_fill, insert_paint, insert_group, instantiate,
     insert_levels_effect, insert_compare_mask_effect, insert_filter_effect,
     insert_generator_effect, insert_anchor_point_effect, insert_color_selection_effect,
@@ -294,6 +294,16 @@ class CommanderWidget(QtWidgets.QWidget):
         
         layout.addLayout(macro_layout)
         
+        # Procedural refresh controls
+        procedural_layout = QtWidgets.QHBoxLayout()
+        
+        self.refresh_procedurals_button = QtWidgets.QPushButton("Refresh Procedurals")
+        self.refresh_procedurals_button.clicked.connect(self.refresh_procedurals)
+        self.refresh_procedurals_button.setToolTip("Reload procedural resources from Substance Painter")
+        procedural_layout.addWidget(self.refresh_procedurals_button)
+        
+        layout.addLayout(procedural_layout)
+        
         # Status label
         self.status_label = QtWidgets.QLabel("Ready")
         layout.addWidget(self.status_label)
@@ -319,8 +329,18 @@ class CommanderWidget(QtWidgets.QWidget):
         self.macros_file = self._get_macros_file_path()
         self.load_macros()
         
+        # Initialize procedural loading state
+        self.procedurals_loaded = False
+        self.procedurals_cache = []
+        
+        # Project monitoring
+        self.last_project_state = None
+        
         # Initialize with commands (now that macros are loaded)
         self.refresh_commands()
+        
+        # Start project monitoring for automatic procedural loading
+        self.start_project_monitoring()
     
     def eventFilter(self, obj, event):
         """Event filter to intercept key events from search input"""
@@ -450,7 +470,7 @@ class CommanderWidget(QtWidgets.QWidget):
     
     # ---- Core Commander functionality ----
     
-    def refresh_commands(self):
+    def refresh_commands(self, force_reload_procedurals=False):
         """Populate the list with ALL available layer commands from API"""
         self.results_list.clear()
         
@@ -516,12 +536,24 @@ class CommanderWidget(QtWidgets.QWidget):
         for cmd in commands:
             self.results_list.addItem(cmd)
         
-        # Add procedural resources below layerstack commands
+        # Add procedural resources with lazy loading
         procedural_count = 0
         try:
-            substance_painter.logging.info("Commander: Loading procedural resources...")
-            procedurals = self.get_procedural_resources()
-            substance_painter.logging.info(f"Commander: Found {len(procedurals)} procedural resources")
+            if force_reload_procedurals or not self.procedurals_loaded:
+                substance_painter.logging.info("Commander: Loading procedural resources...")
+                procedurals = self.get_procedural_resources()
+                substance_painter.logging.info(f"Commander: Found {len(procedurals)} procedural resources")
+                
+                if len(procedurals) > 0:
+                    self.procedurals_cache = procedurals
+                    self.procedurals_loaded = True
+                    substance_painter.logging.info("Commander: Successfully cached procedural resources")
+                else:
+                    substance_painter.logging.warning("Commander: No procedural resources found - resource system may not be ready yet")
+            else:
+                procedurals = self.procedurals_cache
+                substance_painter.logging.info(f"Commander: Using cached procedural resources ({len(procedurals)} items)")
+            
             for procedural in procedurals:
                 item = QtWidgets.QListWidgetItem(f"[PROC] {procedural['name']}")
                 item.setForeground(QtGui.QBrush(QtGui.QColor(100, 149, 237)))  # Cornflower blue
@@ -530,6 +562,7 @@ class CommanderWidget(QtWidgets.QWidget):
                 item.setData(QtCore.Qt.UserRole, procedural)
                 self.results_list.addItem(item)
                 procedural_count += 1
+                
         except Exception as e:
             substance_painter.logging.error(f"Commander: Error loading procedural resources: {e}")
             import traceback
@@ -548,10 +581,18 @@ class CommanderWidget(QtWidgets.QWidget):
             macro_count += 1
         
         total_items = len(commands) + procedural_count + macro_count
-        self.status_label.setText(f"Found {total_items} items ({len(commands)} commands, {procedural_count} procedurals, {macro_count} macros)")
+        status_text = f"Found {total_items} items ({len(commands)} commands, {procedural_count} procedurals, {macro_count} macros)"
+        if not self.procedurals_loaded and procedural_count == 0:
+            status_text += " - Try 'Refresh Procedurals' if missing"
+        self.status_label.setText(status_text)
     
     def on_search_changed(self, text):
         """Filter commands based on search and auto-select first visible item"""
+        # Check if user is searching for procedurals but they haven't been loaded yet
+        if text.lower() in ['proc', 'procedural', 'noise', 'grunge', 'pattern'] and not self.procedurals_loaded:
+            substance_painter.logging.info("Commander: User searching for procedurals - triggering lazy load")
+            self.refresh_commands(force_reload_procedurals=True)
+        
         first_visible_item = None
         
         for i in range(self.results_list.count()):
@@ -577,7 +618,14 @@ class CommanderWidget(QtWidgets.QWidget):
         try:
             # Handle macro execution
             if command.startswith("[MACRO]"):
-                macro_name = command[7:].strip()  # Remove "[MACRO] " prefix
+                macro_display = command[7:].strip()  # Remove "[MACRO] " prefix
+                
+                # Extract actual macro name (remove hotkey suffix if present)
+                if '(' in macro_display and macro_display.endswith(')'):
+                    macro_name = macro_display.rsplit(' (', 1)[0].strip()
+                else:
+                    macro_name = macro_display
+                
                 self.execute_macro(macro_name)
                 return
             
@@ -1132,12 +1180,86 @@ class CommanderWidget(QtWidgets.QWidget):
     
     # ---- End Macro System ----
     
+    def refresh_procedurals(self):
+        """Refresh procedural resources on demand"""
+        try:
+            self.status_label.setText("Refreshing procedural resources...")
+            # Force a fresh reload of procedurals
+            self.procedurals_loaded = False
+            self.procedurals_cache = []
+            
+            # Refresh the command list which will reload procedurals
+            self.refresh_commands(force_reload_procedurals=True)
+            
+            # Update button text temporarily to show success
+            original_text = self.refresh_procedurals_button.text()
+            self.refresh_procedurals_button.setText("✓ Refreshed!")
+            
+            # Timer to reset button text
+            QtCore.QTimer.singleShot(2000, lambda: self.refresh_procedurals_button.setText(original_text))
+            
+            substance_painter.logging.info("Commander: Manual procedural refresh completed")
+            
+        except Exception as e:
+            self.status_label.setText(f"Error refreshing procedurals: {str(e)}")
+            substance_painter.logging.error(f"Commander: Error during manual procedural refresh: {e}")
+    
+    # ---- End Procedural System ----
+    
+    def start_project_monitoring(self):
+        """Start monitoring project state changes for automatic procedural loading"""
+        try:
+            # Create timer for project monitoring
+            self.project_timer = QtCore.QTimer()
+            self.project_timer.timeout.connect(self.check_project_status)
+            self.project_timer.start(2000)  # Check every 2 seconds
+            
+            # Initial check
+            self.check_project_status()
+            
+            substance_painter.logging.info("Commander: Started project monitoring for automatic procedural loading")
+            
+        except Exception as e:
+            substance_painter.logging.error(f"Commander: Error starting project monitoring: {e}")
+    
+    def check_project_status(self):
+        """Check for project state changes and load procedurals when project opens"""
+        try:
+            current_state = substance_painter.project.is_open()
+            
+            # Check for state changes
+            if self.last_project_state != current_state:
+                if current_state:
+                    # Project just opened - perfect time to load procedurals!
+                    substance_painter.logging.info("Commander: Project opened - automatically loading procedurals")
+                    
+                    # Force a fresh reload of procedurals since project context is now available
+                    self.procedurals_loaded = False
+                    self.procedurals_cache = []
+                    self.refresh_commands(force_reload_procedurals=True)
+                    
+                    substance_painter.logging.info("Commander: Automatic procedural loading completed")
+                else:
+                    substance_painter.logging.info("Commander: Project closed")
+                
+                self.last_project_state = current_state
+        
+        except Exception as e:
+            # Don't log monitoring errors as they're not critical and could spam the log
+            pass
+    
+    # ---- End Project Monitoring ----
+    
     def create_paint_layer(self):
         """Create a paint layer using official API"""
         stack = substance_painter.textureset.get_active_stack()
         insert_position = InsertPosition.from_textureset_stack(stack)
         layer = substance_painter.layerstack.insert_paint(insert_position)
         layer.set_name("Paint Layer")
+        
+        # Select the newly created layer for macro chaining
+        set_selected_nodes([layer])
+        substance_painter.logging.info("Created and selected paint layer")
     
     def create_fill_layer(self):
         """Create a fill layer using official API"""
@@ -1145,6 +1267,10 @@ class CommanderWidget(QtWidgets.QWidget):
         insert_position = InsertPosition.from_textureset_stack(stack)
         layer = substance_painter.layerstack.insert_fill(insert_position)
         layer.set_name("Fill Layer")
+        
+        # Select the newly created layer for macro chaining
+        set_selected_nodes([layer])
+        substance_painter.logging.info("Created and selected fill layer")
     
     def create_group_layer(self):
         """Create a group layer using official API"""
@@ -1152,6 +1278,10 @@ class CommanderWidget(QtWidgets.QWidget):
         insert_position = InsertPosition.from_textureset_stack(stack)
         layer = substance_painter.layerstack.insert_group(insert_position)
         layer.set_name("Group")
+        
+        # Select the newly created layer for macro chaining
+        set_selected_nodes([layer])
+        substance_painter.logging.info("Created and selected group layer")
     
     def create_instance_layer(self):
         """Create instance layer from selected layer using official API"""
@@ -1163,6 +1293,10 @@ class CommanderWidget(QtWidgets.QWidget):
             insert_position = InsertPosition.from_textureset_stack(stack)
             instance = instantiate(insert_position, source_layer)
             instance.set_name(f"Instance of {source_layer.get_name()}")
+            
+            # Select the newly created instance for macro chaining
+            set_selected_nodes([instance])
+            substance_painter.logging.info("Created and selected instance layer")
         else:
             raise ValueError("No layer selected to instance")
     
@@ -1175,41 +1309,82 @@ class CommanderWidget(QtWidgets.QWidget):
     
     # === EFFECT COMMANDS ===
     def insert_fill_effect(self):
-        """Insert fill effect on selected layer using official API"""
+        """Insert fill effect on selected layer using official API - context aware"""
         stack = substance_painter.textureset.get_active_stack()
         selected_nodes = get_selected_nodes(stack)
         
         if selected_nodes:
             layer = selected_nodes[0]
-            insert_position = InsertPosition.inside_node(layer, NodeStack.Content)
+            
+            # Check selection context to determine where to insert
+            selection_type = substance_painter.layerstack.get_selection_type(layer)
+            
+            if selection_type == SelectionType.Mask and layer.has_mask():
+                # Insert into mask stack
+                insert_position = InsertPosition.inside_node(layer, NodeStack.Mask)
+                context_name = "mask"
+            else:
+                # Insert into content stack
+                insert_position = InsertPosition.inside_node(layer, NodeStack.Content)
+                context_name = "content"
+            
             effect = insert_fill(insert_position)
-            effect.set_name("Fill Effect")
+            effect.set_name(f"Fill Effect ({context_name})")
+            substance_painter.logging.info(f"Inserted fill effect into {context_name} stack")
         else:
             raise ValueError("No layer selected")
     
     def insert_paint_effect(self):
-        """Insert paint effect on selected layer using official API"""
+        """Insert paint effect on selected layer using official API - context aware"""
         stack = substance_painter.textureset.get_active_stack()
         selected_nodes = get_selected_nodes(stack)
         
         if selected_nodes:
             layer = selected_nodes[0]
-            insert_position = InsertPosition.inside_node(layer, NodeStack.Content)
-            effect = insert_paint(insert_position)
-            effect.set_name("Paint Effect")
+            
+            # Check selection context to determine where to insert
+            selection_type = substance_painter.layerstack.get_selection_type(layer)
+            
+            if selection_type == SelectionType.Mask and layer.has_mask():
+                # For masks, use insert_fill (paint doesn't work properly in mask context)
+                insert_position = InsertPosition.inside_node(layer, NodeStack.Mask)
+                effect = insert_fill(insert_position)  # Use fill for masks
+                effect.set_name("Paint Effect (mask)")
+                context_name = "mask"
+            else:
+                # For content, use insert_paint
+                insert_position = InsertPosition.inside_node(layer, NodeStack.Content)
+                effect = insert_paint(insert_position)
+                effect.set_name("Paint Effect (content)")
+                context_name = "content"
+            
+            substance_painter.logging.info(f"Inserted paint effect into {context_name} stack")
         else:
             raise ValueError("No layer selected")
     
     def insert_levels_effect(self):
-        """Insert levels effect using official API"""
+        """Insert levels effect using official API - context aware"""
         stack = substance_painter.textureset.get_active_stack()
         selected_nodes = get_selected_nodes(stack)
         
         if selected_nodes:
             layer = selected_nodes[0]
-            insert_position = InsertPosition.inside_node(layer, NodeStack.Content)
+            
+            # Check selection context to determine where to insert
+            selection_type = substance_painter.layerstack.get_selection_type(layer)
+            
+            if selection_type == SelectionType.Mask and layer.has_mask():
+                # Insert into mask stack
+                insert_position = InsertPosition.inside_node(layer, NodeStack.Mask)
+                context_name = "mask"
+            else:
+                # Insert into content stack
+                insert_position = InsertPosition.inside_node(layer, NodeStack.Content)
+                context_name = "content"
+            
             effect = insert_levels_effect(insert_position)
-            effect.set_name("Levels")
+            effect.set_name(f"Levels ({context_name})")
+            substance_painter.logging.info(f"Inserted levels effect into {context_name} stack")
         else:
             raise ValueError("No layer selected")
     
@@ -1230,41 +1405,80 @@ class CommanderWidget(QtWidgets.QWidget):
             raise ValueError("No layer selected")
     
     def insert_filter_effect(self):
-        """Insert filter effect using official API"""
+        """Insert filter effect using official API - context aware"""
         stack = substance_painter.textureset.get_active_stack()
         selected_nodes = get_selected_nodes(stack)
         
         if selected_nodes:
             layer = selected_nodes[0]
-            insert_position = InsertPosition.inside_node(layer, NodeStack.Content)
+            
+            # Check selection context to determine where to insert
+            selection_type = substance_painter.layerstack.get_selection_type(layer)
+            
+            if selection_type == SelectionType.Mask and layer.has_mask():
+                # Insert into mask stack
+                insert_position = InsertPosition.inside_node(layer, NodeStack.Mask)
+                context_name = "mask"
+            else:
+                # Insert into content stack
+                insert_position = InsertPosition.inside_node(layer, NodeStack.Content)
+                context_name = "content"
+            
             effect = insert_filter_effect(insert_position)
-            effect.set_name("Filter")
+            effect.set_name(f"Filter ({context_name})")
+            substance_painter.logging.info(f"Inserted filter effect into {context_name} stack")
         else:
             raise ValueError("No layer selected")
     
     def insert_generator_effect(self):
-        """Insert generator effect using official API"""
+        """Insert generator effect using official API - context aware"""
         stack = substance_painter.textureset.get_active_stack()
         selected_nodes = get_selected_nodes(stack)
         
         if selected_nodes:
             layer = selected_nodes[0]
-            insert_position = InsertPosition.inside_node(layer, NodeStack.Content)
+            
+            # Check selection context to determine where to insert
+            selection_type = substance_painter.layerstack.get_selection_type(layer)
+            
+            if selection_type == SelectionType.Mask and layer.has_mask():
+                # Insert into mask stack
+                insert_position = InsertPosition.inside_node(layer, NodeStack.Mask)
+                context_name = "mask"
+            else:
+                # Insert into content stack
+                insert_position = InsertPosition.inside_node(layer, NodeStack.Content)
+                context_name = "content"
+            
             effect = insert_generator_effect(insert_position)
-            effect.set_name("Generator")
+            effect.set_name(f"Generator ({context_name})")
+            substance_painter.logging.info(f"Inserted generator effect into {context_name} stack")
         else:
             raise ValueError("No layer selected")
     
     def insert_anchor_point_effect(self):
-        """Insert anchor point effect using official API"""
+        """Insert anchor point effect using official API - context aware"""
         stack = substance_painter.textureset.get_active_stack()
         selected_nodes = get_selected_nodes(stack)
         
         if selected_nodes:
             layer = selected_nodes[0]
-            insert_position = InsertPosition.inside_node(layer, NodeStack.Content)
+            
+            # Check selection context to determine where to insert
+            selection_type = substance_painter.layerstack.get_selection_type(layer)
+            
+            if selection_type == SelectionType.Mask and layer.has_mask():
+                # Insert into mask stack
+                insert_position = InsertPosition.inside_node(layer, NodeStack.Mask)
+                context_name = "mask"
+            else:
+                # Insert into content stack
+                insert_position = InsertPosition.inside_node(layer, NodeStack.Content)
+                context_name = "content"
+            
             effect = insert_anchor_point_effect(insert_position, "Anchor Point")
-            effect.set_name("Anchor Point")
+            effect.set_name(f"Anchor Point ({context_name})")
+            substance_painter.logging.info(f"Inserted anchor point effect into {context_name} stack")
         else:
             raise ValueError("No layer selected")
     
@@ -1567,6 +1781,11 @@ def show_commander():
                     break
         return
     
+    # If procedurals haven't been loaded yet, try a lazy load when first opening
+    if not COMMANDER_WIDGET.procedurals_loaded:
+        substance_painter.logging.info("Commander: First time opening - attempting procedural lazy load")
+        COMMANDER_WIDGET.refresh_commands(force_reload_procedurals=True)
+    
     # Dock is hidden - show it at cursor position
     # Get cursor position
     cursor_pos = QtGui.QCursor.pos()
@@ -1632,6 +1851,30 @@ def close_plugin():
     global COMMANDER_WIDGET, COMMANDER_SHORTCUT, DOCK_WIDGET
     
     substance_painter.logging.info("Commander: Starting stable dock cleanup")
+    
+    # Stop project monitoring timer if it exists
+    if COMMANDER_WIDGET and hasattr(COMMANDER_WIDGET, 'project_timer'):
+        try:
+            COMMANDER_WIDGET.project_timer.stop()
+            COMMANDER_WIDGET.project_timer.deleteLater()
+            substance_painter.logging.info("Commander: Project monitoring timer cleaned up")
+        except Exception as e:
+            substance_painter.logging.error(f"Error cleaning up project timer: {e}")
+    
+    # Clean up macro hotkey shortcuts
+    if COMMANDER_WIDGET and hasattr(COMMANDER_WIDGET, 'macro_shortcuts'):
+        try:
+            for macro_name, shortcut in COMMANDER_WIDGET.macro_shortcuts.items():
+                try:
+                    shortcut.activated.disconnect()
+                    shortcut.setParent(None)
+                    shortcut.deleteLater()
+                except Exception:
+                    pass
+            COMMANDER_WIDGET.macro_shortcuts.clear()
+            substance_painter.logging.info("Commander: Macro hotkeys cleaned up")
+        except Exception as e:
+            substance_painter.logging.error(f"Error cleaning up macro hotkeys: {e}")
     
     # Clean up shortcut
     if COMMANDER_SHORTCUT:
