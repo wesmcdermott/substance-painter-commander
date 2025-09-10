@@ -258,6 +258,195 @@ class MacroCreationDialog(QtWidgets.QDialog):
         """Get the hotkey"""
         return self.hotkey_sequence
 
+class SettingsDialog(QtWidgets.QDialog):
+    """Dialog for configuring Commander settings"""
+    
+    def __init__(self, parent, current_settings):
+        super().__init__(parent)
+        self.current_settings = current_settings.copy()
+        self.new_shortcut = None
+        self.setupUI()
+    
+    def setupUI(self):
+        self.setWindowTitle("Commander Settings")
+        self.setMinimumSize(400, 200)
+        self.setStyleSheet("""
+            QDialog {
+                background-color: #2b2b2b;
+                color: #ffffff;
+            }
+            QLabel {
+                color: #ffffff;
+                font-size: 12px;
+            }
+            QPushButton {
+                background-color: #3c3c3c;
+                color: #ffffff;
+                border: 1px solid #555555;
+                padding: 8px 16px;
+                border-radius: 4px;
+            }
+            QPushButton:hover {
+                background-color: #404040;
+            }
+            QLineEdit {
+                background-color: #404040;
+                color: #ffffff;
+                border: 1px solid #555555;
+                padding: 8px;
+                border-radius: 4px;
+            }
+        """)
+        
+        layout = QtWidgets.QVBoxLayout(self)
+        layout.setSpacing(15)
+        
+        # Title
+        title = QtWidgets.QLabel("Commander Settings")
+        title.setStyleSheet("font-size: 16px; font-weight: bold; margin-bottom: 10px;")
+        layout.addWidget(title)
+        
+        # Main shortcut setting
+        shortcut_label = QtWidgets.QLabel("Main Commander Shortcut:")
+        shortcut_label.setStyleSheet("font-weight: bold; margin-top: 10px;")
+        layout.addWidget(shortcut_label)
+        
+        shortcut_layout = QtWidgets.QHBoxLayout()
+        
+        self.shortcut_input = QtWidgets.QLineEdit()
+        self.shortcut_input.setReadOnly(True)
+        self.shortcut_input.setText(self.current_settings['main_shortcut'])
+        self.shortcut_input.setPlaceholderText("Click 'Record Shortcut' to set...")
+        shortcut_layout.addWidget(self.shortcut_input)
+        
+        self.record_button = QtWidgets.QPushButton("Record Shortcut")
+        self.record_button.clicked.connect(self.record_shortcut)
+        shortcut_layout.addWidget(self.record_button)
+        
+        self.reset_button = QtWidgets.QPushButton("Reset to Default")
+        self.reset_button.clicked.connect(self.reset_to_default)
+        shortcut_layout.addWidget(self.reset_button)
+        
+        layout.addLayout(shortcut_layout)
+        
+        # Help text
+        help_text = QtWidgets.QLabel(
+            "Examples: F9, F10, Ctrl+Shift+C, Alt+Space, Ctrl+/\n" +
+            "⚠️ AVOID: Space, Tab, Enter, F1, F5, Ctrl+S/Z/C/V/X\n" +
+            "(These conflict with Substance Painter's built-in shortcuts)"
+        )
+        help_text.setStyleSheet("color: #888; font-size: 11px; margin-top: 5px;")
+        help_text.setWordWrap(True)
+        layout.addWidget(help_text)
+        
+        # Recovery information
+        recovery_text = QtWidgets.QLabel(
+            "🔧 Manual Recovery: If Commander won't open, edit the file:\n" +
+            "commander_settings.json\n" +
+            "(Located in your home folder or Substance Painter's app data)\n" +
+            "Change 'main_shortcut' back to 'Ctrl+;' and restart Substance Painter"
+        )
+        recovery_text.setStyleSheet("color: #666; font-size: 10px; margin-top: 8px; font-family: monospace;")
+        recovery_text.setWordWrap(True)
+        recovery_text.setTextInteractionFlags(QtCore.Qt.TextInteractionFlag.TextSelectableByMouse)
+        layout.addWidget(recovery_text)
+        
+        # Buttons
+        button_layout = QtWidgets.QHBoxLayout()
+        button_layout.addStretch()
+        
+        ok_button = QtWidgets.QPushButton("OK")
+        ok_button.clicked.connect(self.accept)
+        ok_button.setStyleSheet("background-color: #0078d4;")
+        button_layout.addWidget(ok_button)
+        
+        cancel_button = QtWidgets.QPushButton("Cancel")
+        cancel_button.clicked.connect(self.reject)
+        button_layout.addWidget(cancel_button)
+        
+        layout.addLayout(button_layout)
+        
+        # Focus on shortcut input
+        self.shortcut_input.setFocus()
+    
+    def record_shortcut(self):
+        """Record a shortcut sequence (reuses macro hotkey recording logic)"""
+        self.record_button.setText("Press keys...")
+        self.record_button.setEnabled(False)
+        self.shortcut_input.setText("Listening for keys...")
+        
+        # Install event filter to capture key sequence
+        self.installEventFilter(self)
+        self.grabKeyboard()
+    
+    def eventFilter(self, obj, event):
+        """Capture keyboard events for shortcut recording (same as macro system)"""
+        if event.type() == QtCore.QEvent.Type.KeyPress:
+            key = event.key()
+            modifiers = event.modifiers()
+            
+            # Ignore modifier keys by themselves
+            if key in [QtCore.Qt.Key.Key_Control, QtCore.Qt.Key.Key_Alt, 
+                      QtCore.Qt.Key.Key_Shift, QtCore.Qt.Key.Key_Meta]:
+                return False
+            
+            # Build key sequence
+            modifier_names = []
+            if modifiers & QtCore.Qt.KeyboardModifier.ControlModifier:
+                modifier_names.append("Ctrl")
+            if modifiers & QtCore.Qt.KeyboardModifier.AltModifier:
+                modifier_names.append("Alt")
+            if modifiers & QtCore.Qt.KeyboardModifier.ShiftModifier:
+                modifier_names.append("Shift")
+            if modifiers & QtCore.Qt.KeyboardModifier.MetaModifier:
+                modifier_names.append("Meta")
+            
+            # Get key name (same mapping as macro system)
+            key_name = ""
+            if key == QtCore.Qt.Key.Key_F1: key_name = "F1"
+            elif key == QtCore.Qt.Key.Key_F2: key_name = "F2"
+            elif key == QtCore.Qt.Key.Key_F3: key_name = "F3"
+            elif key == QtCore.Qt.Key.Key_F4: key_name = "F4"
+            elif key == QtCore.Qt.Key.Key_F5: key_name = "F5"
+            elif key == QtCore.Qt.Key.Key_F6: key_name = "F6"
+            elif key == QtCore.Qt.Key.Key_F7: key_name = "F7"
+            elif key == QtCore.Qt.Key.Key_F8: key_name = "F8"
+            elif key == QtCore.Qt.Key.Key_F9: key_name = "F9"
+            elif key == QtCore.Qt.Key.Key_F10: key_name = "F10"
+            elif key == QtCore.Qt.Key.Key_F11: key_name = "F11"
+            elif key == QtCore.Qt.Key.Key_F12: key_name = "F12"
+            else:
+                # Convert to character
+                key_name = QtGui.QKeySequence(key).toString()
+            
+            sequence_text = "+".join(modifier_names + [key_name]) if modifier_names else key_name
+            
+            if sequence_text:
+                self.new_shortcut = sequence_text
+                self.shortcut_input.setText(sequence_text)
+            
+            # Stop recording
+            self.releaseKeyboard()
+            self.removeEventFilter(self)
+            self.record_button.setText("Record Shortcut")
+            self.record_button.setEnabled(True)
+            
+            return True
+        
+        return False
+    
+    def reset_to_default(self):
+        """Reset shortcut to default"""
+        self.new_shortcut = 'Ctrl+;'
+        self.shortcut_input.setText('Ctrl+;')
+    
+    def get_settings(self):
+        """Get the updated settings"""
+        settings = self.current_settings.copy()
+        if self.new_shortcut:
+            settings['main_shortcut'] = self.new_shortcut
+        return settings
+
 class CommanderWidget(QtWidgets.QWidget):
     """Stable dock widget - no crashes!"""
 
@@ -302,6 +491,11 @@ class CommanderWidget(QtWidgets.QWidget):
         self.refresh_procedurals_button.setToolTip("Reload procedural resources from Substance Painter")
         procedural_layout.addWidget(self.refresh_procedurals_button)
         
+        self.settings_button = QtWidgets.QPushButton("Settings")
+        self.settings_button.clicked.connect(self.open_settings)
+        self.settings_button.setToolTip("Configure Commander settings including keyboard shortcuts")
+        procedural_layout.addWidget(self.settings_button)
+        
         layout.addLayout(procedural_layout)
         
         # Status label
@@ -328,6 +522,10 @@ class CommanderWidget(QtWidgets.QWidget):
         self.macros = {}
         self.macros_file = self._get_macros_file_path()
         self.load_macros()
+        
+        # Initialize settings system
+        self.settings = self.load_settings()
+        self.settings_file = self._get_settings_file_path()  # Store for easy access
         
         # Initialize procedural loading state
         self.procedurals_loaded = False
@@ -783,6 +981,134 @@ class CommanderWidget(QtWidgets.QWidget):
             # Fallback to user home directory
             return os.path.expanduser("~/commander_macros.json")
     
+    def _get_settings_file_path(self):
+        """Get the path for the settings file"""
+        try:
+            import substance_painter.application
+            app_data = substance_painter.application.application_data_folder()
+            return os.path.join(app_data, "commander_settings.json")
+        except:
+            # Fallback to user home directory
+            return os.path.expanduser("~/commander_settings.json")
+    
+    def load_settings(self):
+        """Load Commander settings from file"""
+        try:
+            settings_file = self._get_settings_file_path()
+            if os.path.exists(settings_file):
+                with open(settings_file, 'r') as f:
+                    return json.load(f)
+            else:
+                # Return default settings
+                return {
+                    'main_shortcut': 'Ctrl+;',
+                    'version': '1.0'
+                }
+        except Exception as e:
+            substance_painter.logging.error(f"Failed to load settings: {str(e)}")
+            return {'main_shortcut': 'Ctrl+;', 'version': '1.0'}
+    
+    def save_settings(self, settings):
+        """Save Commander settings to file"""
+        try:
+            settings_file = self._get_settings_file_path()
+            with open(settings_file, 'w') as f:
+                json.dump(settings, f, indent=2)
+            substance_painter.logging.info(f"Settings saved to {settings_file}")
+        except Exception as e:
+            substance_painter.logging.error(f"Failed to save settings: {str(e)}")
+    
+    def open_settings(self):
+        """Open the settings dialog"""
+        dialog = SettingsDialog(self, self.settings)
+        if dialog.exec() == QtWidgets.QDialog.DialogCode.Accepted:
+            new_settings = dialog.get_settings()
+            
+            # Check for shortcut changes
+            if new_settings['main_shortcut'] != self.settings['main_shortcut']:
+                # Check for conflicts with existing macros
+                if self.is_main_shortcut_conflict(new_settings['main_shortcut']):
+                    return  # User declined to proceed with conflict
+                
+                # Update the global shortcut
+                self.update_main_shortcut(new_settings['main_shortcut'])
+                
+                self.status_label.setText(f"Main shortcut changed to: {new_settings['main_shortcut']}")
+                substance_painter.logging.info(f"Commander main shortcut updated to: {new_settings['main_shortcut']}")
+            
+            # Save the new settings
+            self.settings = new_settings
+            self.save_settings(self.settings)
+    
+    def is_main_shortcut_conflict(self, shortcut):
+        """Check if main shortcut conflicts with existing macro shortcuts or problematic keys"""
+        
+        # Check for problematic shortcuts that won't work
+        problematic_shortcuts = ['Space', 'Tab', 'Enter', 'Return', 'Escape']
+        if shortcut in problematic_shortcuts:
+            QtWidgets.QMessageBox.warning(
+                self, "Problematic Shortcut",
+                f"⚠️ Shortcut '{shortcut}' is reserved by Substance Painter and may not work properly.\n\n" +
+                f"Recommended shortcuts: F9, F10, F11, Ctrl+Shift+C, Alt+Space, Ctrl+/\n\n" +
+                f"If Commander stops responding, manually edit:\n" +
+                f"commander_settings.json (in your home folder)\n" +
+                f"and change 'main_shortcut' back to 'Ctrl+;'"
+            )
+            # Allow it but warn them
+        
+        # Check for known SP conflicts and warn
+        sp_shortcuts = ['F1', 'F5', 'Ctrl+N', 'Ctrl+O', 'Ctrl+S', 'Ctrl+Z', 'Ctrl+Y', 
+                       'Ctrl+C', 'Ctrl+V', 'Ctrl+X', 'Ctrl+A', 'Ctrl+R', 'Ctrl+Shift+S']
+        if shortcut in sp_shortcuts:
+            reply = QtWidgets.QMessageBox.question(
+                self, "Potential Conflict",
+                f"⚠️ Shortcut '{shortcut}' is used by Substance Painter.\n" +
+                f"This may cause conflicts. Use it anyway?\n\n" +
+                f"Better alternatives: F9, F10, F11, Ctrl+Shift+C",
+                QtWidgets.QMessageBox.StandardButton.Yes | QtWidgets.QMessageBox.StandardButton.No
+            )
+            if reply == QtWidgets.QMessageBox.StandardButton.No:
+                return True  # User declined, treat as conflict
+        
+        # Check against existing macro shortcuts
+        for macro_name, macro_data in self.macros.items():
+            if 'hotkey' in macro_data and macro_data['hotkey'] == shortcut:
+                reply = QtWidgets.QMessageBox.question(
+                    self, "Shortcut Conflict",
+                    f"Shortcut '{shortcut}' is already assigned to macro '{macro_name}'.\n" +
+                    f"Remove it from '{macro_name}' and use as main Commander shortcut?",
+                    QtWidgets.QMessageBox.StandardButton.Yes | QtWidgets.QMessageBox.StandardButton.No
+                )
+                if reply == QtWidgets.QMessageBox.StandardButton.Yes:
+                    # Remove from macro
+                    self.unregister_macro_hotkey(macro_name)
+                    del self.macros[macro_name]['hotkey']
+                    self.save_macros()
+                    return False  # No conflict, we resolved it
+                else:
+                    return True  # Conflict, user declined to resolve
+        return False  # No conflict
+    
+    def update_main_shortcut(self, new_shortcut):
+        """Update the main Commander shortcut"""
+        global COMMANDER_SHORTCUT
+        
+        # Update the global shortcut reference
+        if COMMANDER_SHORTCUT:
+            try:
+                COMMANDER_SHORTCUT.activated.disconnect()
+                COMMANDER_SHORTCUT.setParent(None)
+                COMMANDER_SHORTCUT.deleteLater()
+            except Exception as e:
+                substance_painter.logging.warning(f"Error cleaning up old shortcut: {e}")
+        
+        # Create new shortcut with updated key sequence
+        main_window = substance_painter.ui.get_main_window()
+        COMMANDER_SHORTCUT = QtGui.QShortcut(QtGui.QKeySequence(new_shortcut), main_window)
+        COMMANDER_SHORTCUT.activated.connect(show_commander)
+        
+        substance_painter.logging.info(f"Updated main shortcut to: {new_shortcut}")
+    
     def load_macros(self):
         """Load macros from file and register their hotkeys"""
         try:
@@ -816,6 +1142,24 @@ class CommanderWidget(QtWidgets.QWidget):
     
     def is_hotkey_conflict(self, hotkey, macro_name):
         """Check if hotkey conflicts with existing assignments"""
+        # Check against main Commander shortcut
+        if hotkey == self.settings['main_shortcut']:
+            reply = QtWidgets.QMessageBox.question(
+                self, "Shortcut Conflict",
+                f"Hotkey '{hotkey}' is the main Commander shortcut.\n" +
+                f"Use it for macro '{macro_name}' instead? (You can set a new main shortcut in Settings)",
+                QtWidgets.QMessageBox.StandardButton.Yes | QtWidgets.QMessageBox.StandardButton.No
+            )
+            if reply == QtWidgets.QMessageBox.StandardButton.Yes:
+                # Change main shortcut to default
+                self.settings['main_shortcut'] = 'Ctrl+;'
+                self.save_settings(self.settings)
+                self.update_main_shortcut('Ctrl+;')
+                self.status_label.setText(f"Main shortcut reset to Ctrl+; ('{hotkey}' assigned to macro)")
+                return False  # No conflict, we resolved it
+            else:
+                return True  # Conflict, user declined to resolve
+        
         # Check against other macros
         for name, macro_data in self.macros.items():
             if name != macro_name and 'hotkey' in macro_data:
@@ -2492,11 +2836,16 @@ def start_plugin():
         DOCK_WIDGET = substance_painter.ui.add_dock_widget(COMMANDER_WIDGET)
         DOCK_WIDGET.hide()  # Hidden by default
         
-        # Create keyboard shortcut
+        # Create keyboard shortcut from settings
         main_window = substance_painter.ui.get_main_window()
         from PySide6.QtGui import QShortcut
-        COMMANDER_SHORTCUT = QShortcut(QtGui.QKeySequence("Ctrl+;"), main_window)
+        
+        # Load settings to get the custom shortcut
+        shortcut_key = COMMANDER_WIDGET.settings['main_shortcut']
+        COMMANDER_SHORTCUT = QShortcut(QtGui.QKeySequence(shortcut_key), main_window)
         COMMANDER_SHORTCUT.activated.connect(show_commander)
+        
+        substance_painter.logging.info(f"Commander shortcut set to: {shortcut_key}")
         
         substance_painter.logging.info("Commander Plugin started - STABLE DOCK with popup behavior")
         
